@@ -25,7 +25,13 @@ import {
   CURRENT_USER,
   migrateDbIfNeeded,
 } from '../db';
-import { AUTH0_CONFIG } from '../auth';
+import {
+  AUTH0_CONFIG,
+  fetchUserInfo,
+  clearUserInfoSession,
+  UserInfoResponse,
+  UserInfoFetchResult,
+} from '../auth';
 
 export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   navigation,
@@ -46,6 +52,16 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const [editEmail, setEditEmail] = useState('');
   const [editRole, setEditRole] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // OIDC /userinfo state (one-shot per session guarantee)
+  const [userInfoData, setUserInfoData] = useState<UserInfoResponse | null>(null);
+  const [userInfoMeta, setUserInfoMeta] = useState<{
+    fromCache: boolean;
+    status?: number;
+    lastFetchedAt?: string;
+    error?: string;
+  } | null>(null);
+  const [userInfoLoading, setUserInfoLoading] = useState(false);
 
   const [tokensInfo, setTokensInfo] = useState<{
     accessToken?: string;
@@ -96,28 +112,75 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     }, [loadProfile])
   );
 
-  // Sync profile when Auth0 user changes
-  useEffect(() => {
-    if (user) {
-      const syncUser = async () => {
-        try {
+  // One-shot /userinfo fetch using Access Token as credential
+  const loadUserInfo = useCallback(async (forceRefresh = false) => {
+    if (!user) {
+      setUserInfoData(null);
+      setUserInfoMeta(null);
+      return;
+    }
+
+    try {
+      setUserInfoLoading(true);
+      const credentials = await getCredentials(
+        AUTH0_CONFIG.scope,
+        0,
+        { audience: AUTH0_CONFIG.audience }
+      );
+
+      if (credentials?.accessToken) {
+        const result: UserInfoFetchResult = await fetchUserInfo(
+          credentials.accessToken,
+          forceRefresh
+        );
+
+        if (result.data) {
+          setUserInfoData(result.data);
+          setUserInfoMeta({
+            fromCache: result.fromCache,
+            status: result.status ?? 200,
+            lastFetchedAt: new Date().toLocaleTimeString(),
+          });
+
+          // Sync verified claims from /userinfo into local SQLite
           const synced: UserProfile = {
-            id: user.sub,
-            name: user.name || user.nickname || 'Auth0 User',
-            email: user.email || '',
-            role: 'Auth0 Authenticated User',
+            id: result.data.sub || user.sub,
+            name: result.data.name || result.data.nickname || user.name || 'Auth0 User',
+            email: result.data.email || user.email || '',
+            role: 'Auth0 Verified Member (OIDC /userinfo)',
             avatarColor: '#10B981',
-            joinedAt: new Date().toISOString(),
+            joinedAt: profile?.joinedAt || new Date().toISOString(),
           };
           await upsertUserProfile(db, synced);
           setProfile(synced);
-        } catch (e) {
-          console.error('Failed to sync Auth0 user to SQLite:', e);
+        } else if (result.error) {
+          setUserInfoMeta({
+            fromCache: result.fromCache,
+            status: result.status,
+            error: result.error,
+          });
         }
-      };
-      syncUser();
+      }
+    } catch (err: any) {
+      console.warn('Failed to fetch /userinfo:', err);
+      setUserInfoMeta({
+        fromCache: false,
+        error: err?.message || 'Remote /userinfo call failed.',
+      });
+    } finally {
+      setUserInfoLoading(false);
     }
-  }, [user, db]);
+  }, [user, getCredentials, db, profile?.joinedAt]);
+
+  // Execute /userinfo one-shot fetch upon authentication
+  useEffect(() => {
+    if (user) {
+      loadUserInfo();
+    } else {
+      setUserInfoData(null);
+      setUserInfoMeta(null);
+    }
+  }, [user, loadUserInfo]);
 
   const handleAuth0Login = async () => {
     try {
@@ -128,6 +191,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
         redirectUrl: AUTH0_CONFIG.redirectUri,
       });
       await loadProfile();
+      await loadUserInfo();
     } catch (e: any) {
       console.log('Auth0 login result / error:', e);
       if (e?.message && !e.message.includes('cancelled') && !e.message.includes('User cancelled')) {
@@ -141,6 +205,9 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const handleAuth0Logout = async () => {
     try {
       setAuthActionLoading(true);
+      clearUserInfoSession();
+      setUserInfoData(null);
+      setUserInfoMeta(null);
       await clearSession({
         returnToUrl: AUTH0_CONFIG.logoutUri,
       });
@@ -425,6 +492,113 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           )}
         </View>
 
+        {/* Remote /userinfo OIDC Verification */}
+        <Text style={styles.sectionHeader}>Remote Credential Call (GET /userinfo)</Text>
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Endpoint</Text>
+            <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
+              {AUTH0_CONFIG.userinfoEndpoint}
+            </Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Credential</Text>
+            <Text style={styles.infoVal}>Bearer Access Token</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Policy</Text>
+            <Text style={styles.infoVal}>One-shot per session (Rate limit guard)</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Call Status</Text>
+            <View style={styles.statusRow}>
+              <View
+                style={[
+                  styles.statusDot,
+                  {
+                    backgroundColor: userInfoData
+                      ? '#10B981'
+                      : userInfoMeta?.error
+                      ? '#EF4444'
+                      : '#F59E0B',
+                  },
+                ]}
+              />
+              <Text style={styles.infoVal}>
+                {userInfoLoading
+                  ? 'Fetching...'
+                  : userInfoData
+                  ? userInfoMeta?.fromCache
+                    ? 'Served from Session Cache'
+                    : 'Verified Live from IdP'
+                  : userInfoMeta?.error
+                  ? 'Fallback to Cached Profile'
+                  : 'Awaiting Login'}
+              </Text>
+            </View>
+          </View>
+
+          {userInfoData && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.infoRow}>
+                <Text style={styles.infoKey}>Subject Claim (sub)</Text>
+                <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
+                  {userInfoData.sub}
+                </Text>
+              </View>
+              {userInfoData.email_verified !== undefined && (
+                <>
+                  <View style={styles.divider} />
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoKey}>Email Verified</Text>
+                    <Text
+                      style={[
+                        styles.infoVal,
+                        { color: userInfoData.email_verified ? '#059669' : '#DC2626' },
+                      ]}
+                    >
+                      {userInfoData.email_verified ? '✓ Verified (true)' : '✗ Unverified (false)'}
+                    </Text>
+                  </View>
+                </>
+              )}
+              {userInfoMeta?.lastFetchedAt && (
+                <>
+                  <View style={styles.divider} />
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoKey}>Last Synced</Text>
+                    <Text style={styles.infoValSmall}>{userInfoMeta.lastFetchedAt}</Text>
+                  </View>
+                </>
+              )}
+            </>
+          )}
+
+          {isAuthenticated && (
+            <>
+              <View style={styles.divider} />
+              <TouchableOpacity
+                style={[styles.inspectTokenButton, { backgroundColor: '#F0FDF4' }]}
+                activeOpacity={0.8}
+                onPress={() => loadUserInfo(true)}
+                disabled={userInfoLoading}
+              >
+                {userInfoLoading ? (
+                  <ActivityIndicator size="small" color="#059669" />
+                ) : (
+                  <Text style={[styles.inspectTokenButtonText, { color: '#059669' }]}>
+                    🔄 Refresh /userinfo (One-shot)
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+
         {/* Identity & Database Meta */}
         <Text style={styles.sectionHeader}>Database & Device Storage</Text>
         <View style={styles.infoCard}>
@@ -568,6 +742,17 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
                   <View style={styles.tokenBox}>
                     <Text style={styles.tokenMonoText} selectable>
                       {tokensInfo.idToken}
+                    </Text>
+                  </View>
+                </>
+              )}
+
+              {userInfoData && (
+                <>
+                  <Text style={styles.inputLabel}>Decoded /userinfo Claims (Remote Call Result)</Text>
+                  <View style={styles.tokenBox}>
+                    <Text style={styles.tokenMonoText} selectable>
+                      {JSON.stringify(userInfoData, null, 2)}
                     </Text>
                   </View>
                 </>

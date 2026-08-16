@@ -1,21 +1,23 @@
 # Authentication & Authorization Architecture Design
 
-This document details the authentication and authorization architecture for **Kiki Bookmark**, explaining OpenID Connect (OIDC) integration with Auth0, the complete mechanics of the Authorization Code Flow with Proof Key for Code Exchange (PKCE), and secure token storage in mobile environments.
+This document details the authentication and authorization architecture for **Kiki Bookmark**, explaining OpenID Connect (OIDC) integration with Auth0, the complete mechanics of the Authorization Code Flow with Proof Key for Code Exchange (PKCE), secure token storage in mobile environments, session lifecycle management, and tenant discovery verification.
 
 ---
 
 ## Table of Contents
 
 1. [Architectural Overview](#1-architectural-overview)
-2. [OIDC vs OAuth 2.0 Concepts](#2-oidc-vs-oauth-20-concepts)
-3. [Why Authorization Code with PKCE?](#3-why-authorization-code-with-pkce)
-4. [End-to-End Authentication Flow (Sequence Diagram)](#4-end-to-end-authentication-flow-sequence-diagram)
-5. [Deep Dive: PKCE Mechanics & Cryptography](#5-deep-dive-pkce-mechanics--cryptography)
-6. [Token Types, Lifecycles & Scopes](#6-token-types-lifecycles--scopes)
-7. [Mobile Token Storage & Security Architecture](#7-mobile-token-storage--security-architecture)
-8. [Local Database Synchronization (SQLite)](#8-local-database-synchronization-sqlite)
-9. [Session Management, Refresh Tokens & Logout](#9-session-management-refresh-tokens--logout)
-10. [Configuration & Reference Specs](#10-configuration--reference-specs)
+2. [IETF Best Current Practice for Native Apps (RFC 8252 / BCP 212)](#2-ietf-best-current-practice-for-native-apps-rfc-8252--bcp-212)
+3. [Decision: Credential for Remote Calls & Security Trade-Offs](#3-decision-credential-for-remote-calls--security-trade-offs)
+4. [Tenant Discovery Document & JWKS Cryptographic Audit](#4-tenant-discovery-document--jwks-cryptographic-audit)
+5. [The Remote Call: GET /userinfo & Rate-Limiting Policy](#5-the-remote-call-get-userinfo--rate-limiting-policy)
+6. [Session Lifecycle & Offline Resilience Matrix](#6-session-lifecycle--offline-resilience-matrix)
+7. [End-to-End Authentication Protocol Flow (Sequence Diagram)](#7-end-to-end-authentication-protocol-flow-sequence-diagram)
+8. [Deep Dive: PKCE Mechanics & Cryptographic Proof](#8-deep-dive-pkce-mechanics--cryptographic-proof)
+9. [Token Types, Lifecycles & Scopes](#9-token-types-lifecycles--scopes)
+10. [Mobile Token Storage & Hardware Security Architecture](#10-mobile-token-storage--hardware-security-architecture)
+11. [Local Database Synchronization (SQLite)](#11-local-database-synchronization-sqlite)
+12. [Configuration Settings & Reference Specifications](#12-configuration-settings--reference-specifications)
 
 ---
 
@@ -23,10 +25,10 @@ This document details the authentication and authorization architecture for **Ki
 
 Kiki Bookmark is a native mobile application built on **React Native (Expo SDK 57)** and uses **Auth0** as its centralized Identity Provider (IdP). The application acts as a **Public Client** under the OAuth 2.0 specification, communicating with:
 
-* **Authorization Server (Auth0)**: Handles identity verification, authentication policies, social/database logins, and issues cryptographically signed tokens.
-* **Resource Server (Backend API)**: Accepts and validates OAuth 2.0 Access Tokens for protected API operations.
+* **Authorization Server (Auth0)**: Handles identity verification, authentication policies, social/database logins, and issues cryptographically signed tokens (`dev-yg.us.auth0.com`).
+* **Resource Server (Backend API / UserInfo)**: Accepts and validates OAuth 2.0 Access Tokens for protected operations and profile queries (`/userinfo` endpoint).
 * **Client Application (Kiki Bookmark)**: Native mobile client running on iOS and Android.
-* **Local Data Layer (Expo SQLite)**: On-device database caching user profiles and bookmark collections.
+* **Local Data Layer (Expo SQLite)**: On-device database caching user profiles, bookmarks, and collections for offline resilience.
 
 ```mermaid
 flowchart TD
@@ -34,277 +36,331 @@ flowchart TD
     subgraph MobileDevice ["Mobile Device (Kiki Bookmark)"]
         UI[React Native UI]
         Auth0SDK["react-native-auth0 SDK"]
+        UserInfoService["OIDC UserInfo Service\n(One-Shot Session Cache)"]
         SecureStore["Native Secure Storage\n(iOS Keychain / Android Keystore)"]
         SQLite[("Local SQLite Database\n(users, bookmarks, collections)")]
     end
     
-    subgraph CloudServices ["Cloud Infrastructure"]
-        Auth0Server["Auth0 Identity Provider\n(dev-yg.us.auth0.com)"]
-        BackendAPI["Resource Server / Bookmark API\n(Audience: bbl-candidate-test-api)"]
+    subgraph CloudServices ["Cloud Infrastructure (Auth0 Tenant)"]
+        Auth0Server["Auth0 Authorization Server\n(dev-yg.us.auth0.com)"]
+        UserInfoEndpoint["OIDC /userinfo Endpoint\n(dev-yg.us.auth0.com/userinfo)"]
+        JWKSEndpoint["JWKS Key Registry\n(dev-yg.us.auth0.com/.well-known/jwks.json)"]
     end
 
     User <-->|Interacts| UI
-    UI <-->|Login / Logout / GetUser| Auth0SDK
-    Auth0SDK <-->|Secure Browser / ASWebAuthSession / CustomTabs| Auth0Server
+    UI <-->|Login / Logout| Auth0SDK
+    Auth0SDK <-->|ASWebAuthSession / CustomTabs| Auth0Server
     Auth0SDK <-->|Save / Retrieve Tokens| SecureStore
-    UI <-->|Sync Profile & Query Data| SQLite
-    Auth0SDK -.->|Bearer Access Token| BackendAPI
+    UI <-->|Fetch User Profile| UserInfoService
+    UserInfoService -->|Bearer Access Token| UserInfoEndpoint
+    UI <-->|Sync Profile & Query Cache| SQLite
+    Auth0SDK -.->|Verify Signatures| JWKSEndpoint
 ```
 
 ---
 
-## 2. OIDC vs OAuth 2.0 Concepts
+## 2. IETF Best Current Practice for Native Apps (RFC 8252 / BCP 212)
 
-While often used interchangeably, **OAuth 2.0** and **OpenID Connect (OIDC)** serve distinct but complementary purposes:
+### Citation & Standard
+Kiki Bookmark strictly adheres to **[RFC 8252](https://datatracker.ietf.org/doc/html/rfc8252) (BCP 212) — *OAuth 2.0 for Native Apps*** and **[RFC 7636](https://datatracker.ietf.org/doc/html/rfc7636) (*Proof Key for Code Exchange by OAuth Public Clients*)**.
 
-| Aspect | OAuth 2.0 (RFC 6749) | OpenID Connect (OIDC Core 1.0) |
+### The Vulnerability in Popular React Native Login Tutorials
+Many popular React Native tutorials instruct developers to use embedded WebViews (e.g. `<WebView source={{ uri: authUrl }} />`) for authentication. **This is an anti-pattern explicitly prohibited by RFC 8252 Section 8.12.**
+
+```
+       INSECURE (Tutorial Pattern)                  SECURE (RFC 8252 BCP 212 Pattern)
+  ┌─────────────────────────────────┐        ┌─────────────────────────────────────────┐
+  │     Host Mobile Application     │        │         Host Mobile Application         │
+  │  ┌───────────────────────────┐  │        │  ┌───────────────────┐                  │
+  │  │    Embedded <WebView>     │  │        │  │  react-native-    │                  │
+  │  │  (App has full DOM/JS     │  │        │  │  auth0 SDK        │                  │
+  │  │   access to passwords!)   │  │        │  └─────────┬─────────┘                  │
+  │  └───────────────────────────┘  │        └────────────┼────────────────────────────┘
+  └─────────────────────────────────┘                     │ Secure IPC
+                                                          ▼
+                                             ┌─────────────────────────────────────────┐
+                                             │ Isolated OS System Browser Sandbox      │
+                                             │ (ASWebAuthenticationSession /           │
+                                             │  Android Custom Tabs)                   │
+                                             │  • App CANNOT inspect DOM or keys       │
+                                             │  • Shared SSO cookies with Safari/Chrome│
+                                             │  • Native Passkeys / WebAuthn / FaceID  │
+                                             └─────────────────────────────────────────┘
+```
+
+### What RFC 8252 / BCP 212 Protects Against:
+1. **Credential Harvesting & Keylogging**: In an embedded WebView, the hosting app (or any compromised third-party SDK/analytics library linked into the app bundle) has full access to the Document Object Model (DOM). It can attach JavaScript mutation observers and keydown listeners to harvest plaintext user passwords and multi-factor codes. RFC 8252 mandates an external system browser (`ASWebAuthenticationSession` on iOS, `CustomTabs` on Android), running in an isolated OS process where the host app has zero memory or DOM visibility.
+2. **Session Cookie Theft**: Embedded WebViews run in the app's private cookie jar. Malicious code inside the app can extract session cookies. System browsers isolate cookies in the OS browser sandbox.
+3. **Single Sign-On (SSO) & Biometric/Passkey Enablement**: System browsers share session state with the platform browser (Safari/Chrome). If the user is already logged in on the device, they authenticate with zero keystrokes. System browsers also natively support WebAuthn, FIDO2 hardware keys, and OS Passkeys/FaceID, which embedded WebViews break.
+4. **Authorization Code Interception**: Mobile apps register custom URI schemes (e.g., `com.bbl.bookmarks://`). Multiple apps can claim the same scheme. RFC 8252 + RFC 7636 (PKCE) guarantees that even if an attacker intercepts the redirected `authorization_code`, they cannot exchange it for tokens without the cryptographically protected `code_verifier` held in private app memory.
+
+---
+
+## 3. Decision: Credential for Remote Calls & Security Trade-Offs
+
+### Formal Decision Statement
+* **Chosen Remote Credential**: **Access Token (`access_token`)**
+* **One-Line Rationale**:
+  > *"The Access Token is treated as the sole credential for remote calls because it is audience-bound and cryptographically scoped for resource server authorization (including the OIDC `/userinfo` endpoint), whereas ID Tokens are client-facing identity assertions not authorized for remote API delegation."*
+
+### In-Depth Security Defense & Trade-Off Matrix
+
+```mermaid
+classDiagram
+    class AccessToken {
+        +String token_type: "Bearer"
+        +String audience: "dev-yg.us.auth0.com/userinfo"
+        +String scope: "openid profile email"
+        +Number exp: Short-lived (24h)
+        +Recipient: Resource Server & /userinfo
+    }
+    class IdToken {
+        +String iss: "https://dev-yg.us.auth0.com/"
+        +String aud: "pSy06qYaqa5WT6sAgN537lFlWMC2d0uN"
+        +String sub: User ID
+        +Claims: name, email, picture
+        +Recipient: Mobile Client ONLY
+    }
+    class RefreshToken {
+        +String type: "Opaque Rotating Token"
+        +Storage: Hardware Secure Enclave
+        +Recipient: Auth0 /oauth/token ONLY
+    }
+```
+
+#### 1. Access Token vs. ID Token Trade-Offs
+* **Audience Containment (RFC 6749 Section 1.4 vs. OIDC Core 1.0 Section 2)**:
+  * The **ID Token**'s audience claim (`aud`) is strictly bound to the **Client ID** (`pSy06qYaqa5WT6sAgN537lFlWMC2d0uN`). Its purpose is to prove *to the mobile app* that the user authenticated. Sending an ID Token to a remote API breaks audience containment and violates the OIDC specification.
+  * The **Access Token** is specifically minted for the target **Audience** (e.g., `https://dev-yg.us.auth0.com/userinfo` or backend resource servers). Resource servers validate that the token's audience matches their own identifier.
+* **Information Leakage**: ID tokens contain user claims (`name`, `email`, `email_verified`, `picture`). Passing ID tokens in HTTP headers to multiple downstream microservices leaks personal identifiable information (PII) unnecessarily across network boundaries.
+
+#### 2. Access Token vs. Refresh Token Trade-Offs
+* **Exposure Minimization & Blast Radius**:
+  * Access tokens have a short Time-to-Live (TTL = 86400s / 24 hours). If intercepted over the wire, an attacker's window of opportunity is limited.
+  * Refresh tokens are long-lived credentials. They are **never transmitted to remote resource servers or the `/userinfo` endpoint**. They are strictly restricted to communication with Auth0's `/oauth/token` endpoint and stored in hardware-backed storage (iOS Keychain / Android KeyStore).
+
+#### 3. Cryptographic Verification: Stateless RS256 JWT vs. Endpoint Verification
+* The `/userinfo` endpoint directly validates the Bearer Access Token against Auth0's session registry.
+* For backend APIs, the Access Token is verified statelessly against the tenant's public JWKS (`RS256`), eliminating database roundtrips on every request while maintaining cryptographic integrity.
+
+---
+
+## 4. Tenant Discovery Document & JWKS Cryptographic Audit
+
+Before committing to the architectural design, the tenant's OpenID Connect Discovery Document (`/.well-known/openid-configuration`) and JSON Web Key Set (`/.well-known/jwks.json`) were queried and verified live against `https://dev-yg.us.auth0.com`.
+
+### Discovery Document Verification Summary
+
+```json
+// GET https://dev-yg.us.auth0.com/.well-known/openid-configuration
+{
+  "issuer": "https://dev-yg.us.auth0.com/",
+  "authorization_endpoint": "https://dev-yg.us.auth0.com/authorize",
+  "token_endpoint": "https://dev-yg.us.auth0.com/oauth/token",
+  "userinfo_endpoint": "https://dev-yg.us.auth0.com/userinfo",
+  "jwks_uri": "https://dev-yg.us.auth0.com/.well-known/jwks.json",
+  "revocation_endpoint": "https://dev-yg.us.auth0.com/oauth/revoke",
+  "scopes_supported": ["openid", "profile", "offline_access", "name", "given_name", "family_name", "nickname", "email", "email_verified", "picture", "created_at", "identities", "phone", "address"],
+  "response_types_supported": ["code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"],
+  "code_challenge_methods_supported": ["S256", "plain"],
+  "token_endpoint_auth_signing_alg_values_supported": ["RS256", "RS384", "PS256"],
+  "id_token_signing_alg_values_supported": ["HS256", "RS256", "PS256"],
+  "dpop_signing_alg_values_supported": ["ES256"],
+  "grant_types_supported": ["client_credentials", "authorization_code", "refresh_token", "password", "implicit", "urn:ietf:params:oauth:grant-type:device_code"],
+  "request_uri_parameter_supported": false,
+  "request_parameter_supported": false
+}
+```
+
+### Architectural Reasoning on Tenant Capabilities
+
+| Feature / Parameter | Tenant Capability | Architectural Decision & Justification |
 | :--- | :--- | :--- |
-| **Primary Goal** | **Authorization** (Delegated Access) | **Authentication** (Federated Identity) |
-| **Question Answered**| *"What is this client permitted to access?"* | *"Who is the current user?"* |
-| **Token Produced** | **Access Token** (opaque string or JWT) | **ID Token** (signed JWT containing identity claims) |
-| **Usage** | Sent in `Authorization: Bearer <token>` header to Resource APIs | Consumed and verified by the Client to establish local user session |
-| **Standard Endpoints** | `/authorize`, `/oauth/token`, `/oauth/revoke` | `/userinfo`, `/.well-known/openid-configuration`, `/.well-known/jwks.json` |
-
-In Kiki Bookmark, **OIDC** provides the user's identity profile (name, email, unique `sub` ID, picture), while **OAuth 2.0** grants permissions (via `audience` and `scope`) to interact with backend bookmark services.
-
----
-
-## 3. Why Authorization Code with PKCE?
-
-### The Mobile Client Security Dilemma (Public Client)
-Mobile applications are classified as **Public Clients** because client binaries can be decompiled, inspected, and reverse-engineered. Consequently:
-* **No `client_secret` can be safely embedded** in the mobile app bundle.
-* Traditional *Authorization Code Flow* relies on a `client_secret` during the token exchange to prove the client's identity.
-* The legacy *Implicit Flow* (`response_type=token`) returned access tokens directly in the redirect URL fragment, exposing them to URL logging, browser history, and unauthorized app interception.
-
-### The Authorization Code Interception Attack
-On mobile operating systems (iOS / Android), apps register Custom URL schemes (e.g. `com.bbl.bookmarks://`). Multiple applications could theoretically register or intercept custom scheme redirects. If a malicious app intercepts the `authorization_code`, it could attempt to exchange it for tokens.
-
-### How PKCE (RFC 7636) Resolves This
-**Proof Key for Code Exchange (PKCE)** replaces static secrets with a dynamic, one-time cryptographic proof generated in memory for each login attempt:
-1. The client creates a secret random string called the `code_verifier`.
-2. The client calculates a SHA-256 hash called the `code_challenge` and sends *only the hash* with the initial login request.
-3. When exchanging the authorization code, the client sends the original plaintext `code_verifier`.
-4. Auth0 hashes the verifier and validates that it matches the stored challenge.
-5. Even if an attacker intercepts the authorization code, **they cannot obtain tokens without the original `code_verifier`**, which never leaves the app's memory during the redirect.
+| **Grant Types** | Supports `authorization_code`, `refresh_token`, `implicit`, `client_credentials`, `password`, `device_code` | **Selected `authorization_code` + `refresh_token`.** `implicit` is available on the tenant for legacy web clients but strictly rejected for our mobile client. `password` (ROPC) is rejected to prevent credential handling. |
+| **PKCE Methods** | Supports `["S256", "plain"]` | **Strictly enforced `S256`.** The `plain` method is prohibited because it does not protect against eavesdropping on the initial authorize request. |
+| **Signing Algorithms** | Supports `["RS256", "HS256", "PS256"]` | **Selected `RS256` (Asymmetric RSA-SHA256).** `HS256` is symmetric and would require embedding a shared secret in the mobile client binary (fatal vulnerability for public clients). `RS256` allows public key verification via JWKS. |
+| **JWKS Keys** | 2 Active RSA 2048-bit keys: `tOu0FHcN3C2etrel4Qhaz` and `AU8Qa0nEiLZ2kCdVGwpR0` | Client and resource servers dynamically resolve the matching `kid` (Key ID) header in JWTs against the tenant's public keys. |
+| **Request Objects (JAR/JARM)** | `request_parameter_supported: false`, `request_uri_parameter_supported: false` | The tenant does not support RFC 9101 signed Request Objects (`request` / `request_uri`); standard query parameter transmission over TLS with PKCE is used. |
+| **DPoP (Demonstrating Proof-of-Possession)** | Supports `ES256` | Available for advanced asymmetric sender-constrained tokens; standard Bearer Access Token with RTR is used. |
 
 ---
 
-## 4. End-to-End Authentication Flow (Sequence Diagram)
+## 5. The Remote Call: GET /userinfo & Rate-Limiting Policy
 
-Below is the complete protocol sequence executed when a user logs in to Kiki Bookmark:
+The application makes one mandatory remote call with its Access Token credential:
+```http
+GET https://dev-yg.us.auth0.com/userinfo HTTP/1.1
+Host: dev-yg.us.auth0.com
+Authorization: Bearer <access_token>
+Accept: application/json
+```
+
+### Rate-Limiting & One-Shot Session Architecture (`src/auth/userinfo.ts`)
+The Auth0 `/userinfo` endpoint is strictly rate-limited (HTTP 429). The application treats `/userinfo` as a **one-shot per session operation**, not a polling target:
+
+```mermaid
+flowchart TD
+    Mount[Screen Focus / Profile Mount] --> CheckCache{In-Memory Session Cache\nHas Fresh UserInfo?}
+    CheckCache -- Yes (Cache Hit) --> ReturnCache[Return Cached UserInfo\nNo Remote Call Made]
+    CheckCache -- No (First Run in Session) --> CheckInflight{In-Flight Request\nAlready Active?}
+    CheckInflight -- Yes --> SharePromise[Share In-Flight Promise\nPrevent Concurrent Fetch]
+    CheckInflight -- No --> MakeHTTP["Execute GET /userinfo\n(Authorization: Bearer Access Token)"]
+    
+    MakeHTTP --> ResponseStatus{Response Status}
+    ResponseStatus -- 200 OK --> CacheAndSave["1. Populate Session Cache\n2. Upsert SQLite 'users' Table\n3. Render Verified Claims"]
+    ResponseStatus -- 429 Rate Limited --> Handle429["1. Log Rate Limit Warning\n2. Fallback to Local SQLite Profile"]
+    ResponseStatus -- Network Offline --> HandleOffline["1. Serve Cached SQLite Profile\n2. Flag Offline State in UI"]
+    
+    Logout[User Logs Out] --> ClearCache[clearUserInfoSession\nPurge In-Memory Cache]
+```
+
+### Guarantees Implemented in Code:
+1. **One-Shot Execution**: When `ProfileScreen` loads, `fetchUserInfo(accessToken)` executes once. Subsequent navigation events, tab switches, and component re-renders hit `UserInfoSessionCache` immediately.
+2. **In-Flight Deduplication**: Simultaneous components requesting userinfo share the exact same active `Promise`, preventing parallel duplicate HTTP bursts.
+3. **HTTP 429 & Offline Graceful Degradation**: If Auth0 responds with 429 Too Many Requests or the device has no network, the app transparently falls back to on-device SQLite cached profile records without throwing uncaught exceptions or locking the UI.
+4. **Session Invalidation**: On explicit logout (`clearSession`), `clearUserInfoSession()` purges in-memory claims.
+
+---
+
+## 6. Session Lifecycle & Offline Resilience Matrix
+
+The application's session management is governed by the state of native secure storage, the local SQLite database, and network availability across four critical operating conditions:
+
+| Operating State | Token / Storage State | App Behavior & Authentication Meaning | Recovery / Transition |
+| :--- | :--- | :--- | :--- |
+| **1. Fresh Cold Boot (App Killed & Relaunched)** | Valid `access_token` and `refresh_token` in iOS Keychain / Android KeyStore; user profile in SQLite `users` table. | **Instant launch without login prompt.** Local SQLite profile hydrates UI in 0ms. In parallel, `getCredentials()` validates tokens silently in the background. | If valid, session continues smoothly. If expired, silent refresh executes. |
+| **2. Backgrounded for 1 Week** | `access_token` (~24h TTL) has expired. `refresh_token` remains safely stored in Keychain. | **User remains "Logged In".** Upon returning to the foreground, the next network request calls `getCredentials()`, which automatically uses the `refresh_token` to obtain a new token pair via **Refresh Token Rotation (RTR)**. | If the refresh token was revoked in Auth0 dashboard, `getCredentials()` fails, local secure storage clears, and user is redirected to `LoginScreen`. |
+| **3. Offline / No Connectivity (Airplane Mode)** | Valid SQLite database on disk; remote network unreachable; tokens cannot contact Auth0. | **App remains fully usable offline.** User is considered "Locally Authenticated". All bookmarks, collections, and profile data are read/written locally in SQLite (`WAL` mode). | Remote sync and token rotation are paused until network connectivity resumes. |
+| **4. Explicit Logout** | `clearSession()` executed. | **Session completely terminated.** Keychain/KeyStore tokens deleted, `/userinfo` session cache purged, and Auth0 SSO browser session cookie cleared via `/v2/logout`. | Navigates to `LoginScreen`. Local SQLite data remains intact or can be reset via Developer Actions. |
+
+---
+
+## 7. End-to-End Authentication Protocol Flow (Sequence Diagram)
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as User
     participant App as Kiki Mobile App
-    participant ASWeb as Secure Browser<br/>(ASWebAuthenticationSession / Custom Tabs)
+    participant ASWeb as OS System Browser<br/>(ASWebAuthenticationSession / CustomTabs)
     participant Auth0 as Auth0 Authorization Server<br/>(dev-yg.us.auth0.com)
     participant SecStore as Secure Storage<br/>(iOS Keychain / Android Keystore)
-    participant DB as SQLite DB<br/>(Local Storage)
+    participant SQLite as Local SQLite DB<br/>(kiki_bookmarks.db)
 
     User->>App: Tap "Log In with Auth0"
-    App->>App: 1. Generate code_verifier (cryptographic random 43-128 chars)
+    App->>App: 1. Generate code_verifier (64-byte high-entropy string)
     App->>App: 2. Compute code_challenge = BASE64URL(SHA256(code_verifier))
-    App->>App: 3. Generate state (CSRF mitigation) & nonce
-    App->>SecStore: Temporarily hold code_verifier in memory/transient store
+    App->>App: 3. Generate state (anti-CSRF) & nonce
+    App->>SecStore: Hold code_verifier in secure memory
 
     App->>ASWeb: Launch browser session with /authorize URL
     Note over ASWeb,Auth0: GET /authorize?<br/>response_type=code<br/>&client_id=pSy06qYaqa5WT6sAgN537lFlWMC2d0uN<br/>&redirect_uri=com.bbl.bookmarks://oauth/callback<br/>&scope=openid profile email offline_access<br/>&audience=https://bbl-candidate-test-api<br/>&code_challenge=E9Mel-aVs7w5B...<br/>&code_challenge_method=S256<br/>&state=xyzState123
 
-    ASWeb->>Auth0: Request Login & Consent Screen
-    Auth0-->>ASWeb: Render Auth0 Universal Login UI
-    User->>ASWeb: Enter Credentials / Social Login / MFA
+    ASWeb->>Auth0: Render Auth0 Universal Login UI
+    User->>ASWeb: Enter Credentials / Passkey / Social Login
     ASWeb->>Auth0: Submit Credentials
     Auth0->>Auth0: Verify Credentials & Store (code_challenge, client_id)
-    Auth0->>Auth0: Generate single-use authorization_code (TTL ~ 1-2 min)
+    Auth0->>Auth0: Generate single-use authorization_code (TTL ~ 60s)
     
     Auth0-->>ASWeb: Redirect 302: com.bbl.bookmarks://oauth/callback?code=AUTH_CODE_123&state=xyzState123
     ASWeb-->>App: Deep link routed to App via Custom Scheme
 
-    App->>App: Validate state matches initial state (CSRF Check)
+    App->>App: Validate state matches initial state (Anti-CSRF)
     
     App->>Auth0: POST /oauth/token<br/>grant_type=authorization_code<br/>&client_id=pSy06qYaqa5WT6sAgN537lFlWMC2d0uN<br/>&code=AUTH_CODE_123<br/>&code_verifier=ORIGINAL_CODE_VERIFIER<br/>&redirect_uri=com.bbl.bookmarks://oauth/callback
     
-    Auth0->>Auth0: Compute SHA256(code_verifier)
+    Auth0->>Auth0: Compute BASE64URL(SHA256(code_verifier))
     Auth0->>Auth0: Verify computed hash == stored code_challenge
     
-    Auth0-->>App: 200 OK: { id_token, access_token, refresh_token, expires_in }
+    Auth0-->>App: 200 OK: { access_token, id_token, refresh_token, expires_in: 86400 }
 
-    App->>App: Decode & Validate ID Token (signature, aud, iss, exp)
-    App->>SecStore: Securely persist Access Token, Refresh Token & Credentials
-    App->>DB: Upsert User Profile (id, name, email, avatarColor)
-    App-->>User: Navigate to Home Screen (Authenticated)
+    App->>App: Verify ID Token (RS256 signature, aud, iss, exp)
+    App->>SecStore: Persist Access Token & Refresh Token (Hardware Encrypted)
+    
+    App->>Auth0: GET /userinfo (Authorization: Bearer <access_token>) [One-Shot Remote Call]
+    Auth0-->>App: 200 OK: { sub, name, nickname, email, email_verified, picture }
+    
+    App->>SQLite: Upsert User Profile (id, name, email, avatarColor, joinedAt)
+    App-->>User: Navigate to Authenticated Experience (Home Screen)
 ```
 
 ---
 
-## 5. Deep Dive: PKCE Mechanics & Cryptography
+## 8. Deep Dive: PKCE Mechanics & Cryptographic Proof
 
-### Step 1: Generating the `code_verifier`
-The `code_verifier` is a high-entropy cryptographic random string using characters `[A-Z]`, `[a-z]`, `[0-9]`, `-`, `.`, `_`, `~`, with a minimum length of 43 characters and maximum of 128 characters (RFC 7636 Section 4.1).
+### Mathematical Foundation (RFC 7636)
 
+1. **Entropy Requirement**: The client generates a cryptographically random string $\text{code\_verifier}$ using the unreserved URL character set:
 $$\text{code\_verifier} \in [A\text{-}Z, a\text{-}z, 0\text{-}9, -, ., \_, \sim]^{43\dots128}$$
 
-### Step 2: Creating the `code_challenge`
-The client creates a SHA-256 hash of the ASCII representation of the `code_verifier`, then Base64-URL encodes the raw digest without padding:
-
+2. **Cryptographic Transformation**:
 $$\text{code\_challenge} = \text{Base64UrlEncode}\Big(\text{SHA-256}(\text{ASCII}(\text{code\_verifier}))\Big)$$
 
+3. **Verification Equation**: At token exchange, Auth0 validates:
+$$\text{Base64UrlEncode}\Big(\text{SHA-256}(\text{Received } \text{code\_verifier})\Big) \stackrel{?}{=} \text{Stored } \text{code\_challenge}$$
+
 ```typescript
-// Conceptual Implementation of PKCE generation
+// Conceptual PKCE implementation (handled natively by react-native-auth0)
 import * as Crypto from 'expo-crypto';
 
-// 1. Generate high-entropy verifier
-const codeVerifier = generateRandomString(64); // 43-128 chars
+// 1. Generate 64-char high-entropy string
+const codeVerifier = generateSecureRandom(64);
 
-// 2. SHA-256 digest + Base64-URL encoding
-const hashBuffer = await Crypto.digestStringAsync(
+// 2. SHA-256 Digest + Base64-URL Encoding (No padding)
+const codeChallenge = await Crypto.digestStringAsync(
   Crypto.CryptoDigestAlgorithm.SHA256,
   codeVerifier,
   { encoding: Crypto.CryptoEncoding.BASE64URL }
 );
-const codeChallenge = hashBuffer;
-const codeChallengeMethod = 'S256';
-```
-
-> [!IMPORTANT]
-> The `react-native-auth0` SDK automatically handles high-entropy random generation and SHA-256 transformation natively on iOS and Android under the hood using native crypto APIs (`SecRandomCopyBytes` / `SecureRandom`).
-
-### Step 3: The `/authorize` Request Parameters
-When `authorize()` is called in `LoginScreen.tsx`, the SDK builds the following request:
-
-```http
-GET /authorize HTTP/1.1
-Host: dev-yg.us.auth0.com
-Parameters:
-  response_type         = code
-  client_id             = pSy06qYaqa5WT6sAgN537lFlWMC2d0uN
-  redirect_uri          = com.bbl.bookmarks://oauth/callback
-  scope                 = openid profile email offline_access
-  audience              = https://bbl-candidate-test-api
-  code_challenge        = E9Mel-aVs7w5Bf_jPqJhvo1CzT5r2yM0s...
-  code_challenge_method = S256
-  state                 = 9d8c34f... (anti-CSRF random token)
-```
-
-### Step 4: The `/oauth/token` Back-Channel Exchange
-Once redirected back to the app with the short-lived `authorization_code`, the app sends a direct HTTPS POST request to Auth0's token endpoint:
-
-```http
-POST /oauth/token HTTP/1.1
-Host: dev-yg.us.auth0.com
-Content-Type: application/x-www-form-urlencoded
-
-grant_type    = authorization_code
-&client_id    = pSy06qYaqa5WT6sAgN537lFlWMC2d0uN
-&code         = SplxlOBeZQQYbYS6WxSbIA
-&code_verifier= dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
-&redirect_uri = com.bbl.bookmarks://oauth/callback
-```
-
-Auth0 performs the cryptographic check:
-$$\text{Base64UrlEncode}\Big(\text{SHA-256}(\text{code\_verifier})\Big) \stackrel{?}{=} \text{code\_challenge}$$
-
-If valid, Auth0 responds with the token bundle:
-```json
-{
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
-  "id_token": "eyJhbGciOiJSUzI1NiIs...",
-  "refresh_token": "gAAAAABk9y...",
-  "scope": "openid profile email offline_access",
-  "expires_in": 86400,
-  "token_type": "Bearer"
-}
 ```
 
 ---
 
-## 6. Token Types, Lifecycles & Scopes
+## 9. Token Types, Lifecycles & Scopes
 
-### 1. ID Token (`id_token`)
-* **Format**: JSON Web Token (JWT) signed by Auth0 using RS256 (asymmetric RSA signature verified via JWKS).
-* **Purpose**: Carries verified identity information about the authenticated user to the mobile client.
-* **Claims**:
-  * `sub`: Unique Subject identifier for the user (e.g., `auth0|64df91a...` or `google-oauth2|10928...`).
-  * `name`, `nickname`, `email`, `picture`: Profile metadata.
-  * `iss`: Issuer identifier (`https://dev-yg.us.auth0.com/`).
-  * `aud`: Target audience (must match our `clientId`).
-  * `exp` & `iat`: Expiration and issued-at timestamps.
-
-### 2. Access Token (`access_token`)
-* **Format**: Signed JWT (when `audience` is supplied) or opaque string.
-* **Purpose**: Authorization credential presented in HTTP `Authorization: Bearer <token>` headers when making calls to backend APIs.
-* **Lifetime**: Short-lived (typically 1 hour to 24 hours).
-
-### 3. Refresh Token (`refresh_token`)
-* **Format**: Opaque high-entropy credential.
-* **Purpose**: Used to obtain new Access and ID tokens silently when they expire, without requiring user re-authentication.
-* **Granted by**: Requested via the `offline_access` scope.
-* **Security**: Protected by **Refresh Token Rotation (RTR)** — each time a refresh token is used, Auth0 invalidates it and issues a new refresh token. If an invalidated refresh token is reused, Auth0 treats it as a breach and revokes all downstream tokens for that session.
+| Token | Type & Format | Issued To | Purpose & Intended Recipient | Storage Location |
+| :--- | :--- | :--- | :--- | :--- |
+| **Access Token** | Bearer JWT (RS256 signed) | Client | **Credential for Remote Calls**: Presented in `Authorization: Bearer <token>` to Auth0 `/userinfo` and backend bookmark APIs. | iOS Keychain / Android KeyStore |
+| **ID Token** | OIDC JWT (RS256 signed) | Client | **Identity Assertion**: Consumed exclusively by the mobile app to establish local user identity (`sub`, `name`, `email`). | iOS Keychain / Android KeyStore |
+| **Refresh Token** | Opaque String | Client | **Session Renewal**: Sent exclusively to Auth0 `/oauth/token` to silently obtain new access/ID tokens without prompting user. | iOS Keychain / Android KeyStore |
 
 ---
 
-## 7. Mobile Token Storage & Security Architecture
-
-Storing authentication tokens on mobile devices requires hardware-backed encryption to prevent extraction via file system access or malicious debugging tools.
+## 10. Mobile Token Storage & Hardware Security Architecture
 
 ```mermaid
 graph TB
-    subgraph AppMemory ["App Runtime (JavaScript / React Context)"]
+    subgraph AppMemory ["App Runtime Memory (JS Engine)"]
         UserContext["user profile object\n(sub, name, email, picture)"]
+        SessionCache["UserInfoSessionCache\n(In-memory one-shot store)"]
     end
 
     subgraph NativeStorage ["Secure Hardware-Backed Storage (Auth0 CredentialsManager)"]
         subgraph iOS ["iOS Ecosystem"]
-            KeyChain["iOS Keychain Services\n- kSecClassGenericPassword\n- kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly\n- Hardware AES-256 Encryption"]
+            KeyChain["iOS Keychain Services\n- kSecClassGenericPassword\n- kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly\n- Hardware AES-256 via Secure Enclave"]
         end
         subgraph Android ["Android Ecosystem"]
-            KeyStore["Android KeyStore & EncryptedSharedPreferences\n- Master Key backed by TEE / StrongBox\n- AES-256 GCM encrypted token files"]
+            KeyStore["Android KeyStore & EncryptedSharedPreferences\n- Master Key backed by TEE / StrongBox\n- AES-256 GCM encrypted token records"]
         end
     end
 
-    subgraph PlainStorage ["Plain / Application Storage (Unencrypted)"]
-        SQLiteDB[("SQLite Database\n(Cached User Profile, Bookmarks)\n*NO TOKENS STORED HERE*")]
+    subgraph PlainStorage ["Application Sandbox Storage"]
+        SQLiteDB[("SQLite Database (kiki_bookmarks.db)\n- Cached user info & bookmarks\n*NO TOKENS OR SECRETS STORED HERE*")]
     end
 
-    AppMemory -->|Auth0 CredentialsManager| NativeStorage
-    AppMemory -->|Sync Profile Details Only| SQLiteDB
+    AppMemory -->|CredentialsManager| NativeStorage
+    AppMemory -->|Upsert User Claims Only| SQLiteDB
 ```
 
-### Storage Breakdown by Platform
-
-| Target | Platform Storage Mechanism | Security Level | Data Stored |
-| :--- | :--- | :--- | :--- |
-| **Refresh & Access Tokens** | **iOS Keychain** (`kSecClassGenericPassword`) | **Highest** (Hardware Secure Enclave, sandbox isolated) | `access_token`, `refresh_token`, `id_token` |
-| **Refresh & Access Tokens** | **Android KeyStore** + `EncryptedSharedPreferences` | **Highest** (Hardware TEE / StrongBox key management) | `access_token`, `refresh_token`, `id_token` |
-| **User Identity & Bookmarks**| **Expo SQLite** (`users`, `bookmarks`, `collections`) | **Application Sandbox** (Standard OS sandbox) | User display info (`id`, `name`, `email`, `role`), bookmarks |
-
 > [!CAUTION]
-> **Never store raw Access Tokens or Refresh Tokens in `AsyncStorage` or unencrypted SQLite tables.** `AsyncStorage` writes plain unencrypted JSON files on the device filesystem, making tokens susceptible to extraction on rooted/jailbroken devices or via backup archives.
+> **Zero Plaintext Storage**: Access tokens and refresh tokens are **never** stored in `AsyncStorage` or unencrypted SQLite tables. `AsyncStorage` writes plain JSON files accessible on rooted/jailbroken devices and device backups. All tokens reside exclusively in OS Keychain/KeyStore.
 
 ---
 
-## 8. Local Database Synchronization (SQLite)
+## 11. Local Database Synchronization (SQLite)
 
-When authentication completes, Kiki Bookmark syncs non-sensitive identity metadata from the Auth0 user object to the local SQLite database to support offline functionality, relational queries, and ownership filtering.
+When the one-shot `/userinfo` call returns, user identity claims are synchronized into SQLite to enable offline querying, ownership filtering, and relationship integrity:
 
-```mermaid
-flowchart LR
-    Auth0User["Auth0 User Claims\n(sub, name, email, picture)"]
-    UpsertFunc["upsertUserProfile(db, profile)\n(src/db/userRepository.ts)"]
-    SQLiteUsers[("SQLite 'users' table\n- id (PK)\n- name\n- email\n- role\n- avatarColor\n- joinedAt")]
-    BookmarksTable[("SQLite 'bookmarks' table\n- ownerId (FK -> users.id)")]
-    CollectionsTable[("SQLite 'collections' table\n- ownerId (FK -> users.id)")]
-
-    Auth0User -->|Transform| UpsertFunc
-    UpsertFunc -->|INSERT ... ON CONFLICT DO UPDATE| SQLiteUsers
-    SQLiteUsers -.->|Relational link| BookmarksTable
-    SQLiteUsers -.->|Relational link| CollectionsTable
-```
-
-### Upsert Query Pattern (`src/db/userRepository.ts`)
 ```sql
 INSERT INTO users (id, name, email, role, avatarColor, joinedAt)
 VALUES (?, ?, ?, ?, ?, ?)
@@ -317,45 +373,16 @@ ON CONFLICT(id) DO UPDATE SET
 
 ---
 
-## 9. Session Management, Refresh Tokens & Logout
+## 12. Configuration Settings & Reference Specifications
 
-### Silent Token Retrieval & Session Hydration
-On app startup, the `Auth0Provider` initializes and automatically checks native secure storage for valid credentials.
-
-```typescript
-// To retrieve a fresh access token for backend requests:
-const { getCredentials } = useAuth0();
-
-const makeAuthenticatedRequest = async () => {
-  // getCredentials() automatically uses the refresh_token if the access_token has expired
-  const credentials = await getCredentials();
-  const token = credentials?.accessToken;
-  
-  return fetch('https://api.example.com/bookmarks', {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-};
-```
-
-### Logout Flow & Session Revocation
-When a user logs out (`clearSession` in `ProfileScreen.tsx`):
-1. **Local Cleanup**: The SDK removes all stored tokens from the iOS Keychain / Android KeyStore.
-2. **Identity Provider Single Logout (SLO)**: A request is sent to `https://dev-yg.us.auth0.com/v2/logout` with `returnToUrl` to invalidate the Auth0 SSO browser session cookie.
-3. **State Transition**: The `user` object in `useAuth0()` resets to `null`, causing `RootNavigator` to switch from authenticated screens back to `LoginScreen`.
-
----
-
-## 10. Configuration & Reference Specs
-
-### Kiki Bookmark Configuration Settings (`src/auth/config.ts`)
-
+### Production Configuration (`src/auth/config.ts`)
 ```typescript
 export const AUTH0_CONFIG = {
   domain: 'dev-yg.us.auth0.com',
   clientId: 'pSy06qYaqa5WT6sAgN537lFlWMC2d0uN',
   discoveryEndpoint: 'https://dev-yg.us.auth0.com/.well-known/openid-configuration',
+  jwksUri: 'https://dev-yg.us.auth0.com/.well-known/jwks.json',
+  userinfoEndpoint: 'https://dev-yg.us.auth0.com/userinfo',
   bundleId: 'com.bbl.bookmarks',
   customScheme: 'com.bbl.bookmarks',
   redirectUri: 'com.bbl.bookmarks://oauth/callback',
@@ -365,9 +392,10 @@ export const AUTH0_CONFIG = {
 } as const;
 ```
 
-### Relevant Specifications & RFCs
-* **RFC 6749**: [The OAuth 2.0 Authorization Framework](https://datatracker.ietf.org/doc/html/rfc6749)
-* **RFC 7636**: [Proof Key for Code Exchange by OAuth Public Clients (PKCE)](https://datatracker.ietf.org/doc/html/rfc7636)
-* **RFC 8252**: [OAuth 2.0 for Native Apps (Best Current Practice)](https://datatracker.ietf.org/doc/html/rfc8252)
-* **OpenID Connect Core 1.0**: [OpenID Connect Core Specification](https://openid.net/specs/openid-connect-core-1_0.html)
-* **Auth0 React Native SDK**: [`react-native-auth0` Documentation](https://github.com/auth0/react-native-auth0)
+### Reference Specifications
+* **[RFC 8252 (BCP 212)](https://datatracker.ietf.org/doc/html/rfc8252)**: OAuth 2.0 for Native Apps (Best Current Practice)
+* **[RFC 7636](https://datatracker.ietf.org/doc/html/rfc7636)**: Proof Key for Code Exchange by OAuth Public Clients (PKCE)
+* **[RFC 6749](https://datatracker.ietf.org/doc/html/rfc6749)**: The OAuth 2.0 Authorization Framework
+* **[RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750)**: Bearer Token Usage
+* **[OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)**: Core OIDC Specification & UserInfo Endpoint Definition
+* **[OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html)**: Provider Configuration Information
