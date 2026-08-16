@@ -1,6 +1,11 @@
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { HomeScreen, DetailsScreen } from '../screens';
+import {
+  HomeScreen,
+  BookmarkDetailsScreen,
+  CollectionDetailsScreen,
+  ProfileScreen,
+} from '../screens';
 import type { RootStackParamList } from './types';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -27,17 +32,32 @@ export const RootNavigator: React.FC = () => {
         name="Home"
         component={HomeScreen}
         options={{
-          title: 'Home',
           headerShown: false,
         }}
       />
       <Stack.Screen
-        name="Details"
-        component={DetailsScreen}
-        options={({ route }) => ({
-          title: route.params?.title || 'Details',
+        name="BookmarkDetails"
+        component={BookmarkDetailsScreen}
+        options={{
+          title: 'Bookmark Details',
           headerBackTitle: 'Back',
-        })}
+        }}
+      />
+      <Stack.Screen
+        name="CollectionDetails"
+        component={CollectionDetailsScreen}
+        options={{
+          title: 'Collection Details',
+          headerBackTitle: 'Back',
+        }}
+      />
+      <Stack.Screen
+        name="Profile"
+        component={ProfileScreen}
+        options={{
+          title: 'Profile & Database',
+          headerBackTitle: 'Back',
+        }}
       />
     </Stack.Navigator>
   );
