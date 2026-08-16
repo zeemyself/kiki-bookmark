@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -11,7 +11,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth0 } from 'react-native-auth0';
 import { useSQLiteContext } from 'expo-sqlite';
 import type { RootStackScreenProps } from '../navigation/types';
-import { AUTH0_CONFIG } from '../auth';
+import {
+  AUTH0_CONFIG,
+  getBiometricCapabilities,
+  authenticateWithBiometrics,
+  isBiometricUnlockEnabled,
+  BiometricCapabilities,
+} from '../auth';
 import { upsertUserProfile, UserProfile } from '../db';
 
 export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
@@ -21,9 +27,31 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
     user,
     error: auth0Error,
     isLoading: auth0Loading,
+    getCredentials,
   } = useAuth0();
 
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [isBiometricChecking, setIsBiometricChecking] = useState(false);
+  const [biometrics, setBiometrics] = useState<BiometricCapabilities | null>(null);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
+
+  // Check device biometric capabilities & SQLite settings
+  const checkBiometrics = useCallback(async () => {
+    try {
+      const [caps, enabled] = await Promise.all([
+        getBiometricCapabilities(),
+        isBiometricUnlockEnabled(db),
+      ]);
+      setBiometrics(caps);
+      setBiometricEnabled(enabled);
+    } catch (e) {
+      console.error('Failed to load biometric status on LoginScreen:', e);
+    }
+  }, [db]);
+
+  useEffect(() => {
+    checkBiometrics();
+  }, [checkBiometrics]);
 
   // Sync Auth0 authenticated user into local SQLite
   useEffect(() => {
@@ -69,7 +97,63 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
     }
   };
 
-  const isLoading = isAuthenticating || auth0Loading;
+  const handleBiometricUnlock = async () => {
+    if (!biometrics?.isAvailable) {
+      Alert.alert(
+        'Biometric Unavailable',
+        'Biometric authentication is not enrolled or available on this device.'
+      );
+      return;
+    }
+
+    try {
+      setIsBiometricChecking(true);
+      const result = await authenticateWithBiometrics({
+        promptMessage: `Unlock Kiki Bookmark with ${biometrics.biometricName}`,
+        cancelLabel: 'Cancel',
+        fallbackLabel: 'Use Device Passcode',
+      });
+
+      if (result.success) {
+        // Biometric verified! Attempt to restore credentials from secure storage
+        try {
+          const creds = await getCredentials(
+            AUTH0_CONFIG.scope,
+            0,
+            { audience: AUTH0_CONFIG.audience }
+          );
+
+          if (creds?.accessToken) {
+            // Credentials retrieved and valid; Auth0 context will update or user can proceed
+            return;
+          }
+        } catch {
+          // No stored tokens yet in Keychain; prompt standard login
+        }
+
+        // If no credentials found or expired, trigger login
+        Alert.alert(
+          'Biometrics Verified',
+          'Biometric check succeeded. Please complete initial Auth0 login to seed your secure tokens.',
+          [
+            {
+              text: 'Log In Now',
+              onPress: handleLogin,
+            },
+          ]
+        );
+      } else if (result.error && !result.error.includes('user_cancel')) {
+        Alert.alert('Biometric Authentication', result.error);
+      }
+    } catch (err: any) {
+      console.error('Error during biometric unlock:', err);
+      Alert.alert('Biometric Error', err?.message || 'Biometric authentication failed.');
+    } finally {
+      setIsBiometricChecking(false);
+    }
+  };
+
+  const isLoading = isAuthenticating || auth0Loading || isBiometricChecking;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -83,6 +167,16 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
           <Text style={styles.brandSubtitle}>
             Save, organize, and sync your favorite links.
           </Text>
+
+          {/* Biometric Capability Status Chip */}
+          {biometrics?.isAvailable && (
+            <View style={styles.biometricBadge}>
+              <Text style={styles.biometricBadgeIcon}>{biometrics.biometricIcon}</Text>
+              <Text style={styles.biometricBadgeText}>
+                {biometrics.biometricName} Enabled
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Error notice if present */}
@@ -94,15 +188,35 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
           </View>
         )}
 
-        {/* Minimal Action Area */}
+        {/* Action Area */}
         <View style={styles.actionSection}>
+          {biometrics?.isAvailable && (
+            <TouchableOpacity
+              style={[styles.biometricButton, isLoading && styles.buttonDisabled]}
+              onPress={handleBiometricUnlock}
+              disabled={isLoading}
+              activeOpacity={0.85}
+            >
+              {isBiometricChecking ? (
+                <ActivityIndicator color="#4F46E5" size="small" />
+              ) : (
+                <View style={styles.biometricButtonContent}>
+                  <Text style={styles.biometricButtonIcon}>{biometrics.biometricIcon}</Text>
+                  <Text style={styles.biometricButtonText}>
+                    Unlock with {biometrics.biometricName}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
+
           <TouchableOpacity
             style={[styles.loginButton, isLoading && styles.buttonDisabled]}
             onPress={handleLogin}
             disabled={isLoading}
             activeOpacity={0.85}
           >
-            {isLoading ? (
+            {isAuthenticating || auth0Loading ? (
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
               <Text style={styles.loginButtonText}>Log In with Auth0</Text>
@@ -178,6 +292,56 @@ const styles = StyleSheet.create({
   actionSection: {
     width: '100%',
     maxWidth: 320,
+    gap: 12,
+  },
+  biometricBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF2FF',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  biometricBadgeIcon: {
+    fontSize: 14,
+    marginRight: 6,
+  },
+  biometricBadgeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#4338CA',
+  },
+  biometricButton: {
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1.5,
+    borderColor: '#6366F1',
+    paddingVertical: 15,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#4F46E5',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  biometricButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  biometricButtonIcon: {
+    fontSize: 18,
+    marginRight: 8,
+  },
+  biometricButtonText: {
+    color: '#4338CA',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
   loginButton: {
     backgroundColor: '#4F46E5',

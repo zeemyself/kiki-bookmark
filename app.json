@@ -8,7 +8,10 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.bbl.bookmarks"
+      "bundleIdentifier": "com.bbl.bookmarks",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Allow Kiki Bookmark to use Face ID for secure authentication and biometric unlock."
+      }
     },
     "android": {
       "package": "com.bbl.bookmarks",
@@ -26,6 +29,12 @@
     "scheme": "com.bbl.bookmarks",
     "plugins": [
       "expo-sqlite",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Kiki Bookmark to use Face ID for secure authentication and biometric unlock."
+        }
+      ],
       [
         "react-native-auth0",
         {

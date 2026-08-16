@@ -3,3 +3,4 @@ export * from './database';
 export * from './collectionRepository';
 export * from './bookmarkRepository';
 export * from './userRepository';
+export * from './settingsRepository';

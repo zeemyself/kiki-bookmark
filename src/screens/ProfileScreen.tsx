@@ -10,6 +10,7 @@ import {
   Alert,
   ActivityIndicator,
   Image,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -31,6 +32,11 @@ import {
   clearUserInfoSession,
   UserInfoResponse,
   UserInfoFetchResult,
+  getBiometricCapabilities,
+  authenticateWithBiometrics,
+  isBiometricUnlockEnabled,
+  setBiometricUnlockEnabled,
+  BiometricCapabilities,
 } from '../auth';
 
 export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
@@ -72,6 +78,12 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   } | null>(null);
   const [isTokenModalVisible, setIsTokenModalVisible] = useState(false);
 
+  // Biometric authentication state
+  const [biometrics, setBiometrics] = useState<BiometricCapabilities | null>(null);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
+  const [biometricLoading, setBiometricLoading] = useState(false);
+  const [biometricTesting, setBiometricTesting] = useState(false);
+
   const currentUserId = user?.sub || CURRENT_USER.id;
 
   const loadProfile = useCallback(async () => {
@@ -106,10 +118,27 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     }
   }, [db, currentUserId, user]);
 
+  const loadBiometrics = useCallback(async () => {
+    try {
+      setBiometricLoading(true);
+      const [caps, enabled] = await Promise.all([
+        getBiometricCapabilities(),
+        isBiometricUnlockEnabled(db),
+      ]);
+      setBiometrics(caps);
+      setBiometricEnabled(enabled);
+    } catch (e) {
+      console.error('Error querying biometrics on ProfileScreen:', e);
+    } finally {
+      setBiometricLoading(false);
+    }
+  }, [db]);
+
   useFocusEffect(
     useCallback(() => {
       loadProfile();
-    }, [loadProfile])
+      loadBiometrics();
+    }, [loadProfile, loadBiometrics])
   );
 
   // One-shot /userinfo fetch using Access Token as credential
@@ -247,6 +276,83 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
       Alert.alert('Token Retrieval', err?.message || 'No valid credentials found. Please sign in.');
     } finally {
       setAuthActionLoading(false);
+    }
+  };
+
+  const handleToggleBiometric = async (newValue: boolean) => {
+    if (!biometrics?.isAvailable && newValue) {
+      Alert.alert(
+        'Biometrics Not Available',
+        'Biometric authentication is not enrolled or available on this hardware.'
+      );
+      return;
+    }
+
+    if (newValue) {
+      // Require immediate biometric verification before enabling
+      const result = await authenticateWithBiometrics({
+        promptMessage: `Authorize ${biometrics?.biometricName || 'Biometrics'} for Kiki Bookmark`,
+      });
+
+      if (!result.success) {
+        if (result.error && !result.error.includes('user_cancel')) {
+          Alert.alert('Verification Failed', result.error);
+        }
+        return;
+      }
+    }
+
+    try {
+      await setBiometricUnlockEnabled(db, newValue);
+      setBiometricEnabled(newValue);
+      Alert.alert(
+        newValue ? 'Biometric Unlock Enabled' : 'Biometric Unlock Disabled',
+        newValue
+          ? `${biometrics?.biometricName || 'Biometrics'} is now active for quick unlock.`
+          : 'Biometric unlock has been disabled.'
+      );
+    } catch (e: any) {
+      console.error('Failed to update biometric preference:', e);
+      Alert.alert('Error', 'Failed to save biometric preference.');
+    }
+  };
+
+  const handleTestBiometric = async () => {
+    if (!biometrics?.hasHardware) {
+      Alert.alert(
+        'Hardware Not Found',
+        'This device does not have biometric hardware sensors (Face ID / Fingerprint).'
+      );
+      return;
+    }
+
+    if (!biometrics?.isEnrolled) {
+      Alert.alert(
+        'Not Enrolled',
+        'No biometrics are currently enrolled in your device settings. Please register Face ID or Fingerprint in device settings.'
+      );
+      return;
+    }
+
+    try {
+      setBiometricTesting(true);
+      const result = await authenticateWithBiometrics({
+        promptMessage: `Test ${biometrics.biometricName} Sensor`,
+        fallbackLabel: 'Use Passcode',
+      });
+
+      if (result.success) {
+        Alert.alert(
+          'Biometric Verification Passed 🎉',
+          `Successfully verified via ${biometrics.biometricName}. Hardware sensors and native permissions are working properly.`
+        );
+      } else if (result.error && !result.error.includes('user_cancel')) {
+        Alert.alert('Verification Result', result.error);
+      }
+    } catch (e: any) {
+      Alert.alert('Biometric Test Error', e?.message || 'Biometric test failed.');
+    } finally {
+      setBiometricTesting(false);
     }
   };
 
@@ -597,6 +703,82 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               </TouchableOpacity>
             </>
           )}
+        </View>
+
+        {/* Biometrics & Hardware Security */}
+        <Text style={styles.sectionHeader}>Biometric Authentication & Security</Text>
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Biometric Modality</Text>
+            <View style={styles.biometricTypeChip}>
+              <Text style={styles.biometricTypeIcon}>{biometrics?.biometricIcon || '🔒'}</Text>
+              <Text style={styles.biometricTypeText}>{biometrics?.biometricName || 'Detecting...'}</Text>
+            </View>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Sensor Hardware</Text>
+            <View style={styles.statusRow}>
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: biometrics?.hasHardware ? '#10B981' : '#EF4444' },
+                ]}
+              />
+              <Text style={styles.infoVal}>
+                {biometrics?.hasHardware ? 'Detected & Supported' : 'Hardware Not Present'}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Device Enrollment</Text>
+            <View style={styles.statusRow}>
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: biometrics?.isEnrolled ? '#10B981' : '#F59E0B' },
+                ]}
+              />
+              <Text style={styles.infoVal}>
+                {biometrics?.isEnrolled ? 'Enrolled & Active' : 'No Biometrics Enrolled'}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <View style={{ flex: 1, paddingRight: 10 }}>
+              <Text style={styles.infoKey}>Require Biometric Unlock</Text>
+              <Text style={styles.infoSubtext}>
+                Prompt {biometrics?.biometricName || 'biometrics'} for quick app access
+              </Text>
+            </View>
+            <Switch
+              value={biometricEnabled}
+              onValueChange={handleToggleBiometric}
+              trackColor={{ false: '#E2E8F0', true: '#818CF8' }}
+              thumbColor={biometricEnabled ? '#4F46E5' : '#94A3B8'}
+              disabled={!biometrics?.isAvailable}
+            />
+          </View>
+          <View style={styles.divider} />
+          <TouchableOpacity
+            style={[
+              styles.testBiometricButton,
+              (!biometrics?.isAvailable || biometricTesting) && styles.buttonDisabled,
+            ]}
+            activeOpacity={0.8}
+            onPress={handleTestBiometric}
+            disabled={!biometrics?.isAvailable || biometricTesting}
+          >
+            {biometricTesting ? (
+              <ActivityIndicator size="small" color="#4F46E5" />
+            ) : (
+              <Text style={styles.testBiometricButtonText}>
+                {biometrics?.biometricIcon || '🔒'} Test {biometrics?.biometricName || 'Biometric'} Prompt
+              </Text>
+            )}
+          </TouchableOpacity>
         </View>
 
         {/* Identity & Database Meta */}
@@ -1009,6 +1191,48 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#4F46E5',
+  },
+  biometricTypeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF2FF',
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  biometricTypeIcon: {
+    fontSize: 13,
+    marginRight: 4,
+  },
+  biometricTypeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#4338CA',
+  },
+  infoSubtext: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  testBiometricButton: {
+    marginTop: 10,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    paddingVertical: 11,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  testBiometricButtonText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#4338CA',
+  },
+  buttonDisabled: {
+    opacity: 0.5,
   },
   dangerButton: {
     backgroundColor: '#FEF2F2',

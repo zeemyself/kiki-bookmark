@@ -18,6 +18,7 @@ This document details the authentication and authorization architecture for **Ki
 10. [Mobile Token Storage & Hardware Security Architecture](#10-mobile-token-storage--hardware-security-architecture)
 11. [Local Database Synchronization (SQLite)](#11-local-database-synchronization-sqlite)
 12. [Configuration Settings & Reference Specifications](#12-configuration-settings--reference-specifications)
+13. [Biometric Authentication Architecture (expo-local-authentication)](#13-biometric-authentication-architecture-expo-local-authentication)
 
 ---
 
@@ -399,3 +400,48 @@ export const AUTH0_CONFIG = {
 * **[RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750)**: Bearer Token Usage
 * **[OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)**: Core OIDC Specification & UserInfo Endpoint Definition
 * **[OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html)**: Provider Configuration Information
+
+---
+
+## 13. Biometric Authentication Architecture (expo-local-authentication)
+
+Kiki Bookmark integrates on-device biometric security (**Face ID**, **Touch ID**, and Android **BiometricPrompt**) via Expo SDK 57's `expo-local-authentication` module.
+
+```mermaid
+flowchart TD
+    User([User])
+    UI[App Login / Quick Unlock]
+    LocalAuth[LocalAuthentication API\nexpo-local-authentication]
+    SecureEnclave[Hardware Secure Enclave / KeyStore]
+    Auth0Credentials[Auth0 CredentialsManager\nStored Refresh & Access Tokens]
+    Auth0IdP[Auth0 Authorization Server\nToken Endpoint]
+
+    User -->|Tap Quick Unlock| UI
+    UI -->|LocalAuthentication.authenticateAsync| LocalAuth
+    LocalAuth -->|OS Biometric Dialog| SecureEnclave
+    SecureEnclave -- Biometric Match Verified --> LocalAuth
+    LocalAuth -- Success Result --> UI
+    UI -->|getCredentials / Silent Refresh| Auth0Credentials
+    Auth0Credentials -->|If Token Expired: RTR Request| Auth0IdP
+    Auth0IdP -- Rotated Tokens --> Auth0Credentials
+    UI -->|Hydrate Profile & Authorize| Home[Home Dashboard]
+```
+
+### Architectural Principles & Security Boundaries
+
+1. **Hardware-Isolated Verification**:
+   - Biometric authentication is executed entirely by the operating system's dedicated security hardware (Apple Secure Enclave on iOS, TEE / StrongBox Keymaster on Android).
+   - The application JavaScript runtime never accesses raw biometric templates, face meshes, or fingerprint images.
+2. **Local Authorization Gate & App Resume Lifecycle**:
+   - Biometrics serves as a secure, high-speed local unlock gate preventing unauthorized access to an already authenticated mobile device session.
+   - When the application transitions from `background`/`inactive` back to `active` (or cold boots with an active session), if the user is enrolled and has enabled biometric protection, the `BiometricLockOverlay` engages immediately and prompts `authenticateWithBiometrics()`.
+   - When biometrics succeed, the app unlocks seamlessly. If expired, it triggers silent Refresh Token Rotation (RTR).
+3. **Loop & Transient State Prevention**:
+   - Because native biometric system dialogs can briefly trigger OS `inactive` app state transitions, an in-flight reference (`isPromptingRef`) prevents recursive locking loops.
+4. **Graceful Fallback & Passcode Security**:
+   - If the biometric scanner fails or is cancelled, the user can tap "Unlock" to retry, use the native device passcode (`LAPolicyDeviceOwnerAuthentication`), or choose "Sign Out of Account" to clear the session safely.
+5. **Configuration & Persistence**:
+   - Biometric enablement preferences are stored in the local SQLite `app_settings` table.
+   - Native permissions (`NSFaceIDUsageDescription` on iOS, `USE_BIOMETRIC` on Android) are configured via Expo config plugins.
+
+

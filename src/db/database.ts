@@ -3,7 +3,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 export const DATABASE_NAME = 'kiki_bookmarks.db';
 
 export async function migrateDbIfNeeded(db: SQLiteDatabase): Promise<void> {
-  const DATABASE_VERSION = 1;
+  const DATABASE_VERSION = 2;
 
   await db.execAsync(`
     PRAGMA journal_mode = 'wal';
@@ -57,9 +57,26 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_bookmarks_collectionId ON bookmarks(collectionId);
       CREATE INDEX IF NOT EXISTS idx_bookmarks_ownerId ON bookmarks(ownerId);
       CREATE INDEX IF NOT EXISTS idx_collections_ownerId ON collections(ownerId);
+
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
     `);
 
-    currentDbVersion = 1;
+    currentDbVersion = 2;
+  }
+
+  if (currentDbVersion === 1) {
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
+    `);
+    currentDbVersion = 2;
   }
 
   await db.execAsync(`PRAGMA user_version = ${DATABASE_VERSION};`);
