@@ -4,7 +4,6 @@ import {
   Text,
   View,
   TouchableOpacity,
-  SafeAreaView,
   ScrollView,
   TextInput,
   Modal,
@@ -12,6 +11,7 @@ import {
   ActivityIndicator,
   Image,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useAuth0 } from 'react-native-auth0';
@@ -212,11 +212,11 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const handleResetDatabase = () => {
     Alert.alert(
       'Reset Local SQLite Data',
-      'This will drop all local tables and reseed initial sample collections and bookmarks.',
+      'This will drop all local tables and clear all collections, bookmarks, and local data.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Reset & Reseed',
+          text: 'Reset Database',
           style: 'destructive',
           onPress: async () => {
             try {
@@ -229,7 +229,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               `);
               await migrateDbIfNeeded(db);
               await loadProfile();
-              Alert.alert('Success', 'SQLite database reset and re-seeded.');
+              Alert.alert('Success', 'SQLite database has been cleared and reset.');
             } catch (e: any) {
               Alert.alert('Error', e?.message || 'Failed to reset database.');
             } finally {

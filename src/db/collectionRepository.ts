@@ -62,6 +62,26 @@ export async function createCollection(
   const color = input.color ?? '#4F46E5';
   const desc = input.description?.trim() ?? null;
 
+  // Ensure owner exists in users table to satisfy foreign key constraint
+  const existingUser = await db.getFirstAsync<{ id: string }>(
+    `SELECT id FROM users WHERE id = ?;`,
+    [ownerId]
+  );
+  if (!existingUser) {
+    await db.runAsync(
+      `INSERT OR IGNORE INTO users (id, name, email, role, avatarColor, joinedAt)
+       VALUES (?, ?, ?, ?, ?, ?);`,
+      [
+        ownerId,
+        ownerId === CURRENT_USER.id ? CURRENT_USER.name : 'User',
+        ownerId === CURRENT_USER.id ? CURRENT_USER.email : '',
+        ownerId === CURRENT_USER.id ? CURRENT_USER.role : 'Member',
+        ownerId === CURRENT_USER.id ? CURRENT_USER.avatarColor : '#4F46E5',
+        now,
+      ]
+    );
+  }
+
   await db.runAsync(
     `INSERT INTO collections (id, name, description, color, ownerId, createdAt, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?, ?);`,

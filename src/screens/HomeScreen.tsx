@@ -5,12 +5,12 @@ import {
   View,
   TouchableOpacity,
   FlatList,
-  SafeAreaView,
   TextInput,
   ActivityIndicator,
   ScrollView,
   Image,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useAuth0 } from 'react-native-auth0';
