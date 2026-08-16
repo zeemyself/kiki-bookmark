@@ -9,9 +9,11 @@ import {
   TextInput,
   ActivityIndicator,
   ScrollView,
+  Image,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
+import { useAuth0 } from 'react-native-auth0';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   Bookmark,
@@ -34,6 +36,7 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
   navigation,
 }) => {
   const db = useSQLiteContext();
+  const { user: auth0User } = useAuth0();
 
   const [activeTab, setActiveTab] = useState<TabType>('bookmarks');
   const [searchQuery, setSearchQuery] = useState('');
@@ -46,6 +49,8 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
 
   const [isAddBookmarkModalVisible, setIsAddBookmarkModalVisible] = useState(false);
   const [isAddCollectionModalVisible, setIsAddCollectionModalVisible] = useState(false);
+
+  const activeUserId = auth0User?.sub || CURRENT_USER.id;
 
   const loadData = useCallback(async () => {
     try {
@@ -66,18 +71,25 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
         getCollections(db, {
           search: activeTab === 'collections' ? searchQuery : undefined,
         }),
-        getUserProfile(db, CURRENT_USER.id),
+        getUserProfile(db, activeUserId),
       ]);
 
       setBookmarks(bms);
       setCollections(cols);
-      setProfile(user || CURRENT_USER);
+      setProfile(user || (auth0User ? {
+        id: auth0User.sub,
+        name: auth0User.name || auth0User.nickname || 'Auth0 User',
+        email: auth0User.email || '',
+        role: 'Auth0 Member',
+        avatarColor: '#10B981',
+        joinedAt: new Date().toISOString(),
+      } : CURRENT_USER));
     } catch (err) {
       console.error('Error loading home screen data from SQLite:', err);
     } finally {
       setLoading(false);
     }
-  }, [db, searchQuery, selectedCollectionFilter, activeTab]);
+  }, [db, searchQuery, selectedCollectionFilter, activeTab, activeUserId, auth0User]);
 
   useFocusEffect(
     useCallback(() => {
@@ -86,23 +98,21 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
   );
 
   const handleCreateBookmark = async (data: CreateBookmarkInput) => {
-    await createBookmark(db, data);
+    await createBookmark(db, { ...data, ownerId: activeUserId });
     await loadData();
   };
 
   const handleCreateCollection = async (data: CreateCollectionInput) => {
-    await createCollection(db, data);
+    await createCollection(db, { ...data, ownerId: activeUserId });
     await loadData();
   };
 
-  const initials = profile?.name
-    ? profile.name
-        .split(' ')
-        .map((n) => n[0])
-        .join('')
-        .toUpperCase()
-        .substring(0, 2)
-    : 'KV';
+  const initials = (auth0User?.name || profile?.name || 'KU')
+    .split(' ')
+    .map((n) => n[0])
+    .join('')
+    .toUpperCase()
+    .substring(0, 2);
 
   const renderBookmarkItem = ({ item }: { item: Bookmark }) => (
     <TouchableOpacity
@@ -217,12 +227,19 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
         <TouchableOpacity
           style={[
             styles.profileAvatarButton,
-            { backgroundColor: profile?.avatarColor || '#4F46E5' },
+            { backgroundColor: auth0User ? '#10B981' : (profile?.avatarColor || '#4F46E5') },
           ]}
           activeOpacity={0.8}
           onPress={() => navigation.navigate('Profile')}
         >
-          <Text style={styles.profileAvatarText}>{initials}</Text>
+          {auth0User?.picture ? (
+            <Image
+              source={{ uri: auth0User.picture }}
+              style={styles.profileAvatarImage}
+            />
+          ) : (
+            <Text style={styles.profileAvatarText}>{initials}</Text>
+          )}
         </TouchableOpacity>
       </View>
 
@@ -474,6 +491,12 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+    overflow: 'hidden',
+  },
+  profileAvatarImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
   },
   profileAvatarText: {
     color: '#FFFFFF',

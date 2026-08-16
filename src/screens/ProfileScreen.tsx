@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -10,23 +10,28 @@ import {
   Modal,
   Alert,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
+import { useAuth0 } from 'react-native-auth0';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   UserProfile,
   getUserProfile,
   getUserStats,
   updateUserProfile,
+  upsertUserProfile,
   CURRENT_USER,
   migrateDbIfNeeded,
 } from '../db';
+import { AUTH0_CONFIG } from '../auth';
 
 export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   navigation,
 }) => {
   const db = useSQLiteContext();
+  const { authorize, clearSession, user, error: auth0Error, isLoading: auth0Loading, getCredentials } = useAuth0();
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [stats, setStats] = useState<{ collectionsCount: number; bookmarksCount: number }>({
@@ -34,6 +39,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     bookmarksCount: 0,
   });
   const [loading, setLoading] = useState(true);
+  const [authActionLoading, setAuthActionLoading] = useState(false);
 
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
   const [editName, setEditName] = useState('');
@@ -41,27 +47,141 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const [editRole, setEditRole] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const [tokensInfo, setTokensInfo] = useState<{
+    accessToken?: string;
+    idToken?: string;
+    expiresIn?: number;
+    tokenType?: string;
+    scope?: string;
+  } | null>(null);
+  const [isTokenModalVisible, setIsTokenModalVisible] = useState(false);
+
+  const currentUserId = user?.sub || CURRENT_USER.id;
+
   const loadProfile = useCallback(async () => {
     try {
       setLoading(true);
-      const [user, userStats] = await Promise.all([
-        getUserProfile(db, CURRENT_USER.id),
-        getUserStats(db, CURRENT_USER.id),
+      const [userRecord, userStats] = await Promise.all([
+        getUserProfile(db, currentUserId),
+        getUserStats(db, currentUserId),
       ]);
-      setProfile(user || CURRENT_USER);
+
+      if (userRecord) {
+        setProfile(userRecord);
+      } else if (user) {
+        const newProfile: UserProfile = {
+          id: user.sub,
+          name: user.name || user.nickname || 'Auth0 User',
+          email: user.email || '',
+          role: 'Auth0 Verified Member',
+          avatarColor: '#10B981',
+          joinedAt: new Date().toISOString(),
+        };
+        await upsertUserProfile(db, newProfile);
+        setProfile(newProfile);
+      } else {
+        setProfile(CURRENT_USER);
+      }
       setStats(userStats);
     } catch (err) {
       console.error('Error loading profile:', err);
     } finally {
       setLoading(false);
     }
-  }, [db]);
+  }, [db, currentUserId, user]);
 
   useFocusEffect(
     useCallback(() => {
       loadProfile();
     }, [loadProfile])
   );
+
+  // Sync profile when Auth0 user changes
+  useEffect(() => {
+    if (user) {
+      const syncUser = async () => {
+        try {
+          const synced: UserProfile = {
+            id: user.sub,
+            name: user.name || user.nickname || 'Auth0 User',
+            email: user.email || '',
+            role: 'Auth0 Authenticated User',
+            avatarColor: '#10B981',
+            joinedAt: new Date().toISOString(),
+          };
+          await upsertUserProfile(db, synced);
+          setProfile(synced);
+        } catch (e) {
+          console.error('Failed to sync Auth0 user to SQLite:', e);
+        }
+      };
+      syncUser();
+    }
+  }, [user, db]);
+
+  const handleAuth0Login = async () => {
+    try {
+      setAuthActionLoading(true);
+      await authorize({
+        scope: AUTH0_CONFIG.scope,
+        audience: AUTH0_CONFIG.audience,
+        redirectUrl: AUTH0_CONFIG.redirectUri,
+      });
+      await loadProfile();
+    } catch (e: any) {
+      console.log('Auth0 login result / error:', e);
+      if (e?.message && !e.message.includes('cancelled') && !e.message.includes('User cancelled')) {
+        Alert.alert('Authentication Info', e.message || 'Login was not completed.');
+      }
+    } finally {
+      setAuthActionLoading(false);
+    }
+  };
+
+  const handleAuth0Logout = async () => {
+    try {
+      setAuthActionLoading(true);
+      await clearSession({
+        returnToUrl: AUTH0_CONFIG.logoutUri,
+      });
+      setTokensInfo(null);
+      await loadProfile();
+    } catch (e: any) {
+      console.log('Auth0 logout result / error:', e);
+      if (e?.message && !e.message.includes('cancelled')) {
+        Alert.alert('Sign Out Info', e.message || 'Session cleared.');
+      }
+    } finally {
+      setAuthActionLoading(false);
+    }
+  };
+
+  const handleInspectTokens = async () => {
+    try {
+      setAuthActionLoading(true);
+      const credentials = await getCredentials(
+        AUTH0_CONFIG.scope,
+        0,
+        { audience: AUTH0_CONFIG.audience }
+      );
+      if (credentials) {
+        setTokensInfo({
+          accessToken: credentials.accessToken,
+          idToken: credentials.idToken,
+          expiresIn: credentials.expiresIn,
+          tokenType: credentials.tokenType,
+          scope: credentials.scope,
+        });
+        setIsTokenModalVisible(true);
+      } else {
+        Alert.alert('No Active Session', 'Please sign in with Auth0 first to view tokens.');
+      }
+    } catch (err: any) {
+      Alert.alert('Token Retrieval', err?.message || 'No valid credentials found. Please sign in.');
+    } finally {
+      setAuthActionLoading(false);
+    }
+  };
 
   const openEditModal = () => {
     if (!profile) return;
@@ -121,7 +241,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     );
   };
 
-  if (loading && !profile) {
+  if ((loading || auth0Loading) && !profile) {
     return (
       <SafeAreaView style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#4F46E5" />
@@ -129,14 +249,14 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     );
   }
 
-  const initials = profile?.name
-    ? profile.name
-        .split(' ')
-        .map((n) => n[0])
-        .join('')
-        .toUpperCase()
-        .substring(0, 2)
-    : 'KV';
+  const initials = (profile?.name || user?.name || 'KU')
+    .split(' ')
+    .map((n) => n[0])
+    .join('')
+    .toUpperCase()
+    .substring(0, 2);
+
+  const isAuthenticated = !!user;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -144,30 +264,78 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
         {/* Profile Card */}
         <View style={styles.profileCard}>
           <View style={styles.avatarSection}>
+            {user?.picture ? (
+              <Image source={{ uri: user.picture }} style={styles.avatarImage} />
+            ) : (
+              <View
+                style={[
+                  styles.avatarCircle,
+                  { backgroundColor: isAuthenticated ? '#10B981' : (profile?.avatarColor || '#4F46E5') },
+                ]}
+              >
+                <Text style={styles.avatarText}>{initials}</Text>
+              </View>
+            )}
+
             <View
               style={[
-                styles.avatarCircle,
-                { backgroundColor: profile?.avatarColor || '#4F46E5' },
+                styles.badgePill,
+                isAuthenticated ? styles.badgePillAuth : styles.badgePillOffline,
               ]}
             >
-              <Text style={styles.avatarText}>{initials}</Text>
-            </View>
-            <View style={styles.badgePill}>
-              <Text style={styles.badgePillText}>Signed-in Person</Text>
+              <Text
+                style={[
+                  styles.badgePillText,
+                  isAuthenticated ? styles.badgePillAuthText : styles.badgePillOfflineText,
+                ]}
+              >
+                {isAuthenticated ? '● Auth0 Authenticated' : '○ Local / Offline User'}
+              </Text>
             </View>
           </View>
 
-          <Text style={styles.userName}>{profile?.name}</Text>
-          <Text style={styles.userRole}>{profile?.role}</Text>
-          <Text style={styles.userEmail}>{profile?.email}</Text>
+          <Text style={styles.userName}>{user?.name || profile?.name}</Text>
+          <Text style={styles.userRole}>{isAuthenticated ? 'Auth0 OpenID Connect Account' : profile?.role}</Text>
+          <Text style={styles.userEmail}>{user?.email || profile?.email}</Text>
 
-          <TouchableOpacity
-            style={styles.editProfileBtn}
-            activeOpacity={0.8}
-            onPress={openEditModal}
-          >
-            <Text style={styles.editProfileBtnText}>✏️ Edit Profile Info</Text>
-          </TouchableOpacity>
+          {/* Primary Auth Action Button */}
+          <View style={styles.authButtonsRow}>
+            {isAuthenticated ? (
+              <TouchableOpacity
+                style={[styles.authActionButton, styles.logoutButton]}
+                activeOpacity={0.8}
+                onPress={handleAuth0Logout}
+                disabled={authActionLoading}
+              >
+                {authActionLoading ? (
+                  <ActivityIndicator size="small" color="#DC2626" />
+                ) : (
+                  <Text style={styles.logoutButtonText}>🚪 Sign Out from Auth0</Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[styles.authActionButton, styles.loginButton]}
+                activeOpacity={0.8}
+                onPress={handleAuth0Login}
+                disabled={authActionLoading}
+              >
+                {authActionLoading ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.loginButtonText}>🔐 Sign In with Auth0</Text>
+                )}
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              style={styles.editProfileBtn}
+              activeOpacity={0.8}
+              onPress={openEditModal}
+            >
+              <Text style={styles.editProfileBtnText}>✏️ Edit Local Info</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Stats Grid */}
@@ -183,12 +351,88 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           </View>
         </View>
 
-        {/* Identity & Database Meta */}
-        <Text style={styles.sectionHeader}>Authentication & Database Info</Text>
+        {/* OIDC & Auth0 Configuration Spec */}
+        <Text style={styles.sectionHeader}>Auth0 OIDC Configuration</Text>
         <View style={styles.infoCard}>
           <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>User / Owner ID</Text>
-            <Text style={styles.infoVal}>{profile?.id}</Text>
+            <Text style={styles.infoKey}>Auth Status</Text>
+            <View style={styles.statusRow}>
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: isAuthenticated ? '#10B981' : '#F59E0B' },
+                ]}
+              />
+              <Text style={styles.infoVal}>
+                {isAuthenticated ? 'Authenticated' : 'Unauthenticated / Guest'}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Discovery Endpoint</Text>
+            <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
+              {AUTH0_CONFIG.discoveryEndpoint}
+            </Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Auth0 Domain</Text>
+            <Text style={styles.infoVal}>{AUTH0_CONFIG.domain}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Client ID</Text>
+            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.clientId}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Application ID</Text>
+            <Text style={styles.infoVal}>{AUTH0_CONFIG.bundleId}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Redirect URI</Text>
+            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.redirectUri}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Logout URI</Text>
+            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.logoutUri}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Scope</Text>
+            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.scope}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>API Audience</Text>
+            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.audience}</Text>
+          </View>
+
+          {isAuthenticated && (
+            <>
+              <View style={styles.divider} />
+              <TouchableOpacity
+                style={styles.inspectTokenButton}
+                activeOpacity={0.8}
+                onPress={handleInspectTokens}
+              >
+                <Text style={styles.inspectTokenButtonText}>🔍 Inspect Auth Tokens & Claims</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+
+        {/* Identity & Database Meta */}
+        <Text style={styles.sectionHeader}>Database & Device Storage</Text>
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Active User ID / Sub</Text>
+            <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
+              {profile?.id}
+            </Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.infoRow}>
@@ -235,7 +479,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContainer}>
-            <Text style={styles.modalTitle}>Edit Profile</Text>
+            <Text style={styles.modalTitle}>Edit Local Profile</Text>
 
             <Text style={styles.inputLabel}>Full Name</Text>
             <TextInput
@@ -284,6 +528,58 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
                 </Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Inspect Tokens Modal */}
+      <Modal
+        visible={isTokenModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setIsTokenModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <Text style={styles.modalTitle}>Auth0 Tokens & Claims</Text>
+
+            <ScrollView style={{ maxHeight: 350 }}>
+              <Text style={styles.inputLabel}>Token Type</Text>
+              <Text style={styles.tokenValueText}>{tokensInfo?.tokenType || 'Bearer'}</Text>
+
+              <Text style={styles.inputLabel}>Expires In</Text>
+              <Text style={styles.tokenValueText}>
+                {tokensInfo?.expiresIn ? `${tokensInfo.expiresIn} seconds` : 'N/A'}
+              </Text>
+
+              <Text style={styles.inputLabel}>Granted Scopes</Text>
+              <Text style={styles.tokenValueText}>{tokensInfo?.scope || AUTH0_CONFIG.scope}</Text>
+
+              <Text style={styles.inputLabel}>Access Token</Text>
+              <View style={styles.tokenBox}>
+                <Text style={styles.tokenMonoText} selectable>
+                  {tokensInfo?.accessToken || 'Not retrieved'}
+                </Text>
+              </View>
+
+              {tokensInfo?.idToken && (
+                <>
+                  <Text style={styles.inputLabel}>ID Token</Text>
+                  <View style={styles.tokenBox}>
+                    <Text style={styles.tokenMonoText} selectable>
+                      {tokensInfo.idToken}
+                    </Text>
+                  </View>
+                </>
+              )}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.modalBtn, styles.modalSaveBtn, { marginTop: 16 }]}
+              onPress={() => setIsTokenModalVisible(false)}
+            >
+              <Text style={styles.modalSaveBtnText}>Close</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -337,6 +633,14 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 4,
   },
+  avatarImage: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: '#10B981',
+  },
   avatarText: {
     color: '#FFFFFF',
     fontSize: 26,
@@ -344,16 +648,26 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   badgePill: {
-    backgroundColor: '#EEF2FF',
-    paddingHorizontal: 10,
-    paddingVertical: 3,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
     borderRadius: 12,
+  },
+  badgePillAuth: {
+    backgroundColor: '#ECFDF5',
+  },
+  badgePillOffline: {
+    backgroundColor: '#EEF2FF',
   },
   badgePillText: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#4F46E5',
     textTransform: 'uppercase',
+  },
+  badgePillAuthText: {
+    color: '#059669',
+  },
+  badgePillOfflineText: {
+    color: '#4F46E5',
   },
   userName: {
     fontSize: 22,
@@ -371,11 +685,45 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     marginBottom: 16,
   },
+  authButtonsRow: {
+    width: '100%',
+    gap: 8,
+  },
+  authActionButton: {
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loginButton: {
+    backgroundColor: '#4F46E5',
+    shadowColor: '#4F46E5',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  loginButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  logoutButton: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  logoutButtonText: {
+    color: '#DC2626',
+    fontWeight: '700',
+    fontSize: 14,
+  },
   editProfileBtn: {
     backgroundColor: '#F1F5F9',
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 8,
+    alignItems: 'center',
   },
   editProfileBtnText: {
     fontSize: 13,
@@ -432,20 +780,50 @@ const styles = StyleSheet.create({
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     paddingVertical: 8,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   infoKey: {
     fontSize: 13,
     color: '#64748B',
+    flex: 1,
   },
   infoVal: {
     fontSize: 13,
     fontWeight: '600',
     color: '#0F172A',
   },
+  infoValSmall: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0F172A',
+    maxWidth: '55%',
+  },
   divider: {
     height: 1,
     backgroundColor: '#F1F5F9',
+  },
+  inspectTokenButton: {
+    marginTop: 10,
+    backgroundColor: '#EEF2FF',
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  inspectTokenButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#4F46E5',
   },
   dangerButton: {
     backgroundColor: '#FEF2F2',
@@ -524,5 +902,24 @@ const styles = StyleSheet.create({
   modalSaveBtnText: {
     color: '#FFFFFF',
     fontWeight: '600',
+  },
+  tokenValueText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#1E293B',
+    marginBottom: 12,
+  },
+  tokenBox: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+  },
+  tokenMonoText: {
+    fontSize: 11,
+    fontFamily: 'monospace',
+    color: '#334155',
   },
 });

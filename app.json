@@ -23,8 +23,16 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "scheme": "com.bbl.bookmarks",
     "plugins": [
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "react-native-auth0",
+        {
+          "domain": "dev-yg.us.auth0.com",
+          "customScheme": "com.bbl.bookmarks"
+        }
+      ]
     ]
   }
 }

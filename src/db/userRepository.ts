@@ -59,3 +59,33 @@ export async function updateUserProfile(
   }
   return updated;
 }
+
+export async function upsertUserProfile(
+  db: SQLiteDatabase,
+  profile: UserProfile
+): Promise<UserProfile> {
+  await db.runAsync(
+    `INSERT INTO users (id, name, email, role, avatarColor, joinedAt)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       email = excluded.email,
+       role = excluded.role,
+       avatarColor = excluded.avatarColor;`,
+    [
+      profile.id,
+      profile.name,
+      profile.email,
+      profile.role,
+      profile.avatarColor,
+      profile.joinedAt,
+    ]
+  );
+
+  const saved = await getUserProfile(db, profile.id);
+  if (!saved) {
+    throw new Error(`Failed to save user profile for: ${profile.id}`);
+  }
+  return saved;
+}
+
