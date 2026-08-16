@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
+import { useAuth0 } from 'react-native-auth0';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   Collection,
@@ -24,6 +25,7 @@ import {
   UpdateCollectionInput,
   CreateBookmarkInput,
   getCollections,
+  CURRENT_USER,
 } from '../db';
 import { AddEditCollectionModal, AddEditBookmarkModal } from '../components';
 
@@ -32,6 +34,7 @@ export const CollectionDetailsScreen: React.FC<
 > = ({ route, navigation }) => {
   const { collectionId } = route.params;
   const db = useSQLiteContext();
+  const { user: auth0User } = useAuth0();
 
   const [collection, setCollection] = useState<Collection | null>(null);
   const [allCollections, setAllCollections] = useState<Collection[]>([]);
@@ -41,13 +44,15 @@ export const CollectionDetailsScreen: React.FC<
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
   const [isAddBookmarkModalVisible, setIsAddBookmarkModalVisible] = useState(false);
 
+  const activeUserId = auth0User?.sub || CURRENT_USER.id;
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
       const [col, bms, cols] = await Promise.all([
         getCollectionById(db, collectionId),
-        getBookmarks(db, { collectionId }),
-        getCollections(db),
+        getBookmarks(db, { collectionId, ownerId: activeUserId }),
+        getCollections(db, { ownerId: activeUserId }),
       ]);
       setCollection(col);
       setBookmarks(bms);
@@ -57,7 +62,7 @@ export const CollectionDetailsScreen: React.FC<
     } finally {
       setLoading(false);
     }
-  }, [db, collectionId]);
+  }, [db, collectionId, activeUserId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -92,6 +97,7 @@ export const CollectionDetailsScreen: React.FC<
     await createBookmark(db, {
       ...data,
       collectionId,
+      ownerId: activeUserId,
     });
     await loadData();
   };

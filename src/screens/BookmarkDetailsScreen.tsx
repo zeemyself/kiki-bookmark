@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
+import { useAuth0 } from 'react-native-auth0';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   Bookmark,
@@ -21,6 +22,7 @@ import {
   deleteBookmark,
   getCollections,
   UpdateBookmarkInput,
+  CURRENT_USER,
 } from '../db';
 import { AddEditBookmarkModal } from '../components';
 
@@ -29,18 +31,21 @@ export const BookmarkDetailsScreen: React.FC<
 > = ({ route, navigation }) => {
   const { bookmarkId } = route.params;
   const db = useSQLiteContext();
+  const { user: auth0User } = useAuth0();
 
   const [bookmark, setBookmark] = useState<Bookmark | null>(null);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
 
+  const activeUserId = auth0User?.sub || CURRENT_USER.id;
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
       const [bm, cols] = await Promise.all([
         getBookmarkById(db, bookmarkId),
-        getCollections(db),
+        getCollections(db, { ownerId: activeUserId }),
       ]);
       setBookmark(bm);
       setCollections(cols);
@@ -49,7 +54,7 @@ export const BookmarkDetailsScreen: React.FC<
     } finally {
       setLoading(false);
     }
-  }, [db, bookmarkId]);
+  }, [db, bookmarkId, activeUserId]);
 
   useFocusEffect(
     useCallback(() => {

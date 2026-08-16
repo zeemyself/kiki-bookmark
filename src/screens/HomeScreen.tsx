@@ -22,6 +22,7 @@ import {
   getBookmarks,
   getCollections,
   getUserProfile,
+  upsertUserProfile,
   createBookmark,
   createCollection,
   CreateBookmarkInput,
@@ -63,27 +64,38 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
         colFilter = selectedCollectionFilter;
       }
 
-      const [bms, cols, user] = await Promise.all([
+      const [bms, cols, userRecord] = await Promise.all([
         getBookmarks(db, {
           search: searchQuery,
           collectionId: colFilter,
+          ownerId: activeUserId,
         }),
         getCollections(db, {
           search: activeTab === 'collections' ? searchQuery : undefined,
+          ownerId: activeUserId,
         }),
         getUserProfile(db, activeUserId),
       ]);
 
       setBookmarks(bms);
       setCollections(cols);
-      setProfile(user || (auth0User ? {
-        id: auth0User.sub,
-        name: auth0User.name || auth0User.nickname || 'Auth0 User',
-        email: auth0User.email || '',
-        role: 'Auth0 Member',
-        avatarColor: '#10B981',
-        joinedAt: new Date().toISOString(),
-      } : CURRENT_USER));
+
+      if (userRecord) {
+        setProfile(userRecord);
+      } else if (auth0User) {
+        const newProfile: UserProfile = {
+          id: auth0User.sub,
+          name: auth0User.name || auth0User.nickname || 'Auth0 User',
+          email: auth0User.email || '',
+          role: 'Auth0 Member',
+          avatarColor: '#10B981',
+          joinedAt: new Date().toISOString(),
+        };
+        await upsertUserProfile(db, newProfile);
+        setProfile(newProfile);
+      } else {
+        setProfile(CURRENT_USER);
+      }
     } catch (err) {
       console.error('Error loading home screen data from SQLite:', err);
     } finally {
