@@ -333,7 +333,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               activeOpacity={0.8}
               onPress={openEditModal}
             >
-              <Text style={styles.editProfileBtnText}>✏️ Edit Local Info</Text>
+              <Text style={styles.editProfileBtnText}>✏️ Edit Profile Info</Text>
             </TouchableOpacity>
           </View>
         </View>
