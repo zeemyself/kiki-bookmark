@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -10,9 +10,9 @@ import {
   Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useAuth0 } from 'react-native-auth0';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   Bookmark,
@@ -31,36 +31,56 @@ export const BookmarkDetailsScreen: React.FC<
 > = ({ route, navigation }) => {
   const { bookmarkId } = route.params;
   const db = useSQLiteContext();
+  const queryClient = useQueryClient();
   const { user: auth0User } = useAuth0();
 
-  const [bookmark, setBookmark] = useState<Bookmark | null>(null);
-  const [collections, setCollections] = useState<Collection[]>([]);
-  const [loading, setLoading] = useState(true);
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
 
   const activeUserId = auth0User?.sub || CURRENT_USER.id;
 
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [bm, cols] = await Promise.all([
-        getBookmarkById(db, bookmarkId),
-        getCollections(db, { ownerId: activeUserId }),
-      ]);
-      setBookmark(bm);
-      setCollections(cols);
-    } catch (error) {
-      console.error('Error loading bookmark details:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [db, bookmarkId, activeUserId]);
+  // Query: Bookmark details
+  const {
+    data: bookmark,
+    isLoading: isBookmarkLoading,
+  } = useQuery({
+    queryKey: ['bookmark', bookmarkId],
+    queryFn: async () => {
+      return getBookmarkById(db, bookmarkId);
+    },
+  });
 
-  useFocusEffect(
-    useCallback(() => {
-      loadData();
-    }, [loadData])
-  );
+  // Query: Collections (for edit modal)
+  const { data: collections = [] } = useQuery({
+    queryKey: ['collections', { ownerId: activeUserId }],
+    queryFn: async () => {
+      return getCollections(db, { ownerId: activeUserId });
+    },
+  });
+
+  // Mutation: Update Bookmark
+  const updateBookmarkMutation = useMutation({
+    mutationFn: async (data: UpdateBookmarkInput) => {
+      return updateBookmark(db, bookmarkId, data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bookmark', bookmarkId] });
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+    },
+  });
+
+  // Mutation: Delete Bookmark
+  const deleteBookmarkMutation = useMutation({
+    mutationFn: async () => {
+      return deleteBookmark(db, bookmarkId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['userStats'] });
+      navigation.goBack();
+    },
+  });
 
   const handleOpenUrl = async () => {
     if (!bookmark?.url) return;
@@ -77,8 +97,7 @@ export const BookmarkDetailsScreen: React.FC<
   };
 
   const handleUpdateBookmark = async (data: UpdateBookmarkInput) => {
-    await updateBookmark(db, bookmarkId, data);
-    await loadData();
+    await updateBookmarkMutation.mutateAsync(data);
   };
 
   const handleDeleteBookmark = () => {
@@ -90,16 +109,15 @@ export const BookmarkDetailsScreen: React.FC<
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: async () => {
-            await deleteBookmark(db, bookmarkId);
-            navigation.goBack();
+          onPress: () => {
+            deleteBookmarkMutation.mutate();
           },
         },
       ]
     );
   };
 
-  if (loading && !bookmark) {
+  if (isBookmarkLoading && !bookmark) {
     return (
       <SafeAreaView style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#4F46E5" />

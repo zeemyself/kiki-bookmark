@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -13,9 +13,9 @@ import {
   Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useAuth0 } from 'react-native-auth0';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   UserProfile,
@@ -43,31 +43,13 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   navigation,
 }) => {
   const db = useSQLiteContext();
+  const queryClient = useQueryClient();
   const { authorize, clearSession, user, error: auth0Error, isLoading: auth0Loading, getCredentials } = useAuth0();
-
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [stats, setStats] = useState<{ collectionsCount: number; bookmarksCount: number }>({
-    collectionsCount: 0,
-    bookmarksCount: 0,
-  });
-  const [loading, setLoading] = useState(true);
-  const [authActionLoading, setAuthActionLoading] = useState(false);
 
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
   const [editName, setEditName] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editRole, setEditRole] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  // OIDC /userinfo state (one-shot per session guarantee)
-  const [userInfoData, setUserInfoData] = useState<UserInfoResponse | null>(null);
-  const [userInfoMeta, setUserInfoMeta] = useState<{
-    fromCache: boolean;
-    status?: number;
-    lastFetchedAt?: string;
-    error?: string;
-  } | null>(null);
-  const [userInfoLoading, setUserInfoLoading] = useState(false);
 
   const [tokensInfo, setTokensInfo] = useState<{
     accessToken?: string;
@@ -78,25 +60,17 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   } | null>(null);
   const [isTokenModalVisible, setIsTokenModalVisible] = useState(false);
 
-  // Biometric authentication state
-  const [biometrics, setBiometrics] = useState<BiometricCapabilities | null>(null);
-  const [biometricEnabled, setBiometricEnabled] = useState(false);
-  const [biometricLoading, setBiometricLoading] = useState(false);
-  const [biometricTesting, setBiometricTesting] = useState(false);
-
   const currentUserId = user?.sub || CURRENT_USER.id;
 
-  const loadProfile = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [userRecord, userStats] = await Promise.all([
-        getUserProfile(db, currentUserId),
-        getUserStats(db, currentUserId),
-      ]);
-
+  // Query: User Profile
+  const { data: profile, isLoading: isProfileLoading } = useQuery({
+    queryKey: ['userProfile', currentUserId],
+    queryFn: async () => {
+      const userRecord = await getUserProfile(db, currentUserId);
       if (userRecord) {
-        setProfile(userRecord);
-      } else if (user) {
+        return userRecord;
+      }
+      if (user) {
         const newProfile: UserProfile = {
           id: user.sub,
           name: user.name || user.nickname || 'Auth0 User',
@@ -106,255 +80,260 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           joinedAt: new Date().toISOString(),
         };
         await upsertUserProfile(db, newProfile);
-        setProfile(newProfile);
-      } else {
-        setProfile(CURRENT_USER);
+        return newProfile;
       }
-      setStats(userStats);
-    } catch (err) {
-      console.error('Error loading profile:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [db, currentUserId, user]);
+      return CURRENT_USER;
+    },
+  });
 
-  const loadBiometrics = useCallback(async () => {
-    try {
-      setBiometricLoading(true);
-      const [caps, enabled] = await Promise.all([
+  // Query: User Stats
+  const { data: stats = { collectionsCount: 0, bookmarksCount: 0 } } = useQuery({
+    queryKey: ['userStats', currentUserId],
+    queryFn: async () => {
+      return getUserStats(db, currentUserId);
+    },
+  });
+
+  // Query: Biometric Status & Capabilities
+  const { data: biometricStatus, isLoading: isBiometricLoading } = useQuery({
+    queryKey: ['biometrics', 'status'],
+    queryFn: async () => {
+      const [capabilities, isEnabled] = await Promise.all([
         getBiometricCapabilities(),
         isBiometricUnlockEnabled(db),
       ]);
-      setBiometrics(caps);
-      setBiometricEnabled(enabled);
-    } catch (e) {
-      console.error('Error querying biometrics on ProfileScreen:', e);
-    } finally {
-      setBiometricLoading(false);
-    }
-  }, [db]);
+      return { capabilities, isEnabled };
+    },
+  });
 
-  useFocusEffect(
-    useCallback(() => {
-      loadProfile();
-      loadBiometrics();
-    }, [loadProfile, loadBiometrics])
-  );
+  const biometrics = biometricStatus?.capabilities;
+  const biometricEnabled = !!biometricStatus?.isEnabled;
 
-  // One-shot /userinfo fetch using Access Token as credential
-  const loadUserInfo = useCallback(async (forceRefresh = false) => {
-    if (!user) {
-      setUserInfoData(null);
-      setUserInfoMeta(null);
-      return;
-    }
-
-    try {
-      setUserInfoLoading(true);
-      const credentials = await getCredentials(
-        AUTH0_CONFIG.scope,
-        0,
-        { audience: AUTH0_CONFIG.audience }
-      );
-
-      if (credentials?.accessToken) {
-        const result: UserInfoFetchResult = await fetchUserInfo(
-          credentials.accessToken,
-          forceRefresh
+  // Query: OIDC /userinfo with automatic SQLite claims sync
+  const {
+    data: userInfoResult,
+    isFetching: isUserInfoLoading,
+    refetch: refetchUserInfo,
+  } = useQuery<UserInfoFetchResult | null>({
+    queryKey: ['userInfo', user?.sub],
+    enabled: !!user?.sub,
+    queryFn: async (): Promise<UserInfoFetchResult | null> => {
+      if (!user) return null;
+      try {
+        const credentials = await getCredentials(
+          AUTH0_CONFIG.scope,
+          0,
+          { audience: AUTH0_CONFIG.audience }
         );
 
-        if (result.data) {
-          setUserInfoData(result.data);
-          setUserInfoMeta({
-            fromCache: result.fromCache,
-            status: result.status ?? 200,
-            lastFetchedAt: new Date().toLocaleTimeString(),
-          });
+        if (credentials?.accessToken) {
+          const result: UserInfoFetchResult = await fetchUserInfo(
+            credentials.accessToken,
+            false
+          );
 
-          // Sync verified claims from /userinfo into local SQLite
-          const synced: UserProfile = {
-            id: result.data.sub || user.sub,
-            name: result.data.name || result.data.nickname || user.name || 'Auth0 User',
-            email: result.data.email || user.email || '',
-            role: 'Auth0 Verified Member (OIDC /userinfo)',
-            avatarColor: '#10B981',
-            joinedAt: profile?.joinedAt || new Date().toISOString(),
-          };
-          await upsertUserProfile(db, synced);
-          setProfile(synced);
-        } else if (result.error) {
-          setUserInfoMeta({
-            fromCache: result.fromCache,
-            status: result.status,
-            error: result.error,
-          });
+          if (result.data) {
+            // Sync verified claims from /userinfo into local SQLite
+            const synced: UserProfile = {
+              id: result.data.sub || user.sub,
+              name: result.data.name || result.data.nickname || user.name || 'Auth0 User',
+              email: result.data.email || user.email || '',
+              role: 'Auth0 Verified Member (OIDC /userinfo)',
+              avatarColor: '#10B981',
+              joinedAt: profile?.joinedAt || new Date().toISOString(),
+            };
+            await upsertUserProfile(db, synced);
+            queryClient.setQueryData(['userProfile', currentUserId], synced);
+          }
+          return result;
         }
+      } catch (err: any) {
+        console.warn('Failed to fetch /userinfo:', err);
+        return {
+          data: null,
+          fromCache: false,
+          error: err?.message || 'Remote /userinfo call failed.',
+        };
       }
-    } catch (err: any) {
-      console.warn('Failed to fetch /userinfo:', err);
-      setUserInfoMeta({
-        fromCache: false,
-        error: err?.message || 'Remote /userinfo call failed.',
-      });
-    } finally {
-      setUserInfoLoading(false);
-    }
-  }, [user, getCredentials, db, profile?.joinedAt]);
+      return null;
+    },
+  });
 
-  // Execute /userinfo one-shot fetch upon authentication
-  useEffect(() => {
-    if (user) {
-      loadUserInfo();
-    } else {
-      setUserInfoData(null);
-      setUserInfoMeta(null);
-    }
-  }, [user, loadUserInfo]);
+  const userInfoData: UserInfoResponse | null = userInfoResult?.data || null;
+  const userInfoMeta = userInfoResult
+    ? {
+        fromCache: userInfoResult.fromCache,
+        status: userInfoResult.status ?? 200,
+        lastFetchedAt: new Date().toLocaleTimeString(),
+        error: userInfoResult.error,
+      }
+    : null;
 
-  const handleAuth0Login = async () => {
-    try {
-      setAuthActionLoading(true);
+  // Mutation: Auth0 Login
+  const auth0LoginMutation = useMutation({
+    mutationFn: async () => {
       await authorize({
         scope: AUTH0_CONFIG.scope,
         audience: AUTH0_CONFIG.audience,
         redirectUrl: AUTH0_CONFIG.redirectUri,
       });
-      await loadProfile();
-      await loadUserInfo();
-    } catch (e: any) {
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['userProfile'] });
+      queryClient.invalidateQueries({ queryKey: ['userInfo'] });
+      queryClient.invalidateQueries({ queryKey: ['userStats'] });
+    },
+    onError: (e: any) => {
       console.log('Auth0 login result / error:', e);
       if (e?.message && !e.message.includes('cancelled') && !e.message.includes('User cancelled')) {
         Alert.alert('Authentication Info', e.message || 'Login was not completed.');
       }
-    } finally {
-      setAuthActionLoading(false);
-    }
-  };
+    },
+  });
 
-  const handleAuth0Logout = async () => {
-    try {
-      setAuthActionLoading(true);
+  // Mutation: Auth0 Logout
+  const auth0LogoutMutation = useMutation({
+    mutationFn: async () => {
       clearUserInfoSession();
-      setUserInfoData(null);
-      setUserInfoMeta(null);
       await clearSession({
         returnToUrl: AUTH0_CONFIG.logoutUri,
       });
+    },
+    onSuccess: () => {
       setTokensInfo(null);
-      await loadProfile();
-    } catch (e: any) {
+      queryClient.invalidateQueries({ queryKey: ['userProfile'] });
+      queryClient.invalidateQueries({ queryKey: ['userInfo'] });
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+    },
+    onError: (e: any) => {
       console.log('Auth0 logout result / error:', e);
       if (e?.message && !e.message.includes('cancelled')) {
         Alert.alert('Sign Out Info', e.message || 'Session cleared.');
       }
-    } finally {
-      setAuthActionLoading(false);
-    }
-  };
+    },
+  });
 
-  const handleInspectTokens = async () => {
-    try {
-      setAuthActionLoading(true);
+  // Mutation: Inspect Tokens
+  const inspectTokensMutation = useMutation({
+    mutationFn: async () => {
       const credentials = await getCredentials(
         AUTH0_CONFIG.scope,
         0,
         { audience: AUTH0_CONFIG.audience }
       );
-      if (credentials) {
-        setTokensInfo({
-          accessToken: credentials.accessToken,
-          idToken: credentials.idToken,
-          expiresIn: credentials.expiresIn,
-          tokenType: credentials.tokenType,
-          scope: credentials.scope,
-        });
-        setIsTokenModalVisible(true);
-      } else {
-        Alert.alert('No Active Session', 'Please sign in with Auth0 first to view tokens.');
+      if (!credentials) {
+        throw new Error('Please sign in with Auth0 first to view tokens.');
       }
-    } catch (err: any) {
-      Alert.alert('Token Retrieval', err?.message || 'No valid credentials found. Please sign in.');
-    } finally {
-      setAuthActionLoading(false);
-    }
-  };
-
-  const handleToggleBiometric = async (newValue: boolean) => {
-    if (!biometrics?.isAvailable && newValue) {
-      Alert.alert(
-        'Biometrics Not Available',
-        'Biometric authentication is not enrolled or available on this hardware.'
-      );
-      return;
-    }
-
-    if (newValue) {
-      // Require immediate biometric verification before enabling
-      const result = await authenticateWithBiometrics({
-        promptMessage: `Authorize ${biometrics?.biometricName || 'Biometrics'} for Kiki Bookmark`,
+      return credentials;
+    },
+    onSuccess: (credentials) => {
+      setTokensInfo({
+        accessToken: credentials.accessToken,
+        idToken: credentials.idToken,
+        expiresIn: credentials.expiresIn,
+        tokenType: credentials.tokenType,
+        scope: credentials.scope,
       });
+      setIsTokenModalVisible(true);
+    },
+    onError: (err: any) => {
+      Alert.alert('Token Retrieval', err?.message || 'No valid credentials found. Please sign in.');
+    },
+  });
 
-      if (!result.success) {
-        if (result.error && !result.error.includes('user_cancel')) {
-          Alert.alert('Verification Failed', result.error);
-        }
-        return;
+  // Mutation: Toggle Biometrics
+  const toggleBiometricMutation = useMutation({
+    mutationFn: async (newValue: boolean) => {
+      if (!biometrics?.isAvailable && newValue) {
+        throw new Error('Biometric authentication is not enrolled or available on this hardware.');
       }
-    }
 
-    try {
+      if (newValue) {
+        // Require immediate biometric verification before enabling
+        const result = await authenticateWithBiometrics({
+          promptMessage: `Authorize ${biometrics?.biometricName || 'Biometrics'} for Kiki Bookmark`,
+        });
+
+        if (!result.success) {
+          if (result.error && !result.error.includes('user_cancel')) {
+            throw new Error(result.error);
+          }
+          return { cancelled: true, newValue };
+        }
+      }
+
       await setBiometricUnlockEnabled(db, newValue);
-      setBiometricEnabled(newValue);
+      return { cancelled: false, newValue };
+    },
+    onSuccess: (res) => {
+      if (res?.cancelled) return;
+      queryClient.invalidateQueries({ queryKey: ['biometrics', 'status'] });
       Alert.alert(
-        newValue ? 'Biometric Unlock Enabled' : 'Biometric Unlock Disabled',
-        newValue
+        res.newValue ? 'Biometric Unlock Enabled' : 'Biometric Unlock Disabled',
+        res.newValue
           ? `${biometrics?.biometricName || 'Biometrics'} is now active for quick unlock.`
           : 'Biometric unlock has been disabled.'
       );
-    } catch (e: any) {
-      console.error('Failed to update biometric preference:', e);
-      Alert.alert('Error', 'Failed to save biometric preference.');
-    }
-  };
+    },
+    onError: (err: any) => {
+      console.error('Failed to update biometric preference:', err);
+      Alert.alert('Verification / Setup Notice', err?.message || 'Failed to save biometric preference.');
+    },
+  });
 
-  const handleTestBiometric = async () => {
-    if (!biometrics?.hasHardware) {
-      Alert.alert(
-        'Hardware Not Found',
-        'This device does not have biometric hardware sensors (Face ID / Fingerprint).'
-      );
-      return;
-    }
+  // Mutation: Test Biometrics
+  const testBiometricMutation = useMutation({
+    mutationFn: async () => {
+      if (!biometrics?.hasHardware) {
+        throw new Error('This device does not have biometric hardware sensors (Face ID / Fingerprint).');
+      }
 
-    if (!biometrics?.isEnrolled) {
-      Alert.alert(
-        'Not Enrolled',
-        'No biometrics are currently enrolled in your device settings. Please register Face ID or Fingerprint in device settings.'
-      );
-      return;
-    }
+      if (!biometrics?.isEnrolled) {
+        throw new Error('No biometrics are currently enrolled in your device settings. Please register Face ID or Fingerprint in device settings.');
+      }
 
-    try {
-      setBiometricTesting(true);
       const result = await authenticateWithBiometrics({
         promptMessage: `Test ${biometrics.biometricName} Sensor`,
         fallbackLabel: 'Use Passcode',
       });
 
+      if (!result.success && result.error && !result.error.includes('user_cancel')) {
+        throw new Error(result.error);
+      }
+      return result;
+    },
+    onSuccess: (result) => {
       if (result.success) {
         Alert.alert(
           'Biometric Verification Passed 🎉',
-          `Successfully verified via ${biometrics.biometricName}. Hardware sensors and native permissions are working properly.`
+          `Successfully verified via ${biometrics?.biometricName}. Hardware sensors and native permissions are working properly.`
         );
-      } else if (result.error && !result.error.includes('user_cancel')) {
-        Alert.alert('Verification Result', result.error);
       }
-    } catch (e: any) {
-      Alert.alert('Biometric Test Error', e?.message || 'Biometric test failed.');
-    } finally {
-      setBiometricTesting(false);
-    }
-  };
+    },
+    onError: (e: any) => {
+      Alert.alert('Biometric Test Notice', e?.message || 'Biometric test failed.');
+    },
+  });
+
+  // Mutation: Save Profile
+  const saveProfileMutation = useMutation({
+    mutationFn: async (data: { name: string; email: string; role: string }) => {
+      if (!profile) return;
+      await updateUserProfile(db, profile.id, {
+        name: data.name.trim() || profile.name,
+        email: data.email.trim() || profile.email,
+        role: data.role.trim() || profile.role,
+      });
+    },
+    onSuccess: () => {
+      setIsEditModalVisible(false);
+      queryClient.invalidateQueries({ queryKey: ['userProfile', currentUserId] });
+    },
+    onError: () => {
+      Alert.alert('Error', 'Failed to update profile.');
+    },
+  });
 
   const openEditModal = () => {
     if (!profile) return;
@@ -364,22 +343,12 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     setIsEditModalVisible(true);
   };
 
-  const handleSaveProfile = async () => {
-    if (!profile) return;
-    try {
-      setSaving(true);
-      await updateUserProfile(db, profile.id, {
-        name: editName.trim() || profile.name,
-        email: editEmail.trim() || profile.email,
-        role: editRole.trim() || profile.role,
-      });
-      setIsEditModalVisible(false);
-      await loadProfile();
-    } catch (err) {
-      Alert.alert('Error', 'Failed to update profile.');
-    } finally {
-      setSaving(false);
-    }
+  const handleSaveProfile = () => {
+    saveProfileMutation.mutate({
+      name: editName,
+      email: editEmail,
+      role: editRole,
+    });
   };
 
   const handleResetDatabase = () => {
@@ -393,7 +362,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           style: 'destructive',
           onPress: async () => {
             try {
-              setLoading(true);
               await db.execAsync(`
                 DROP TABLE IF EXISTS bookmarks;
                 DROP TABLE IF EXISTS collections;
@@ -401,12 +369,10 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
                 PRAGMA user_version = 0;
               `);
               await migrateDbIfNeeded(db);
-              await loadProfile();
+              queryClient.invalidateQueries();
               Alert.alert('Success', 'SQLite database has been cleared and reset.');
             } catch (e: any) {
               Alert.alert('Error', e?.message || 'Failed to reset database.');
-            } finally {
-              setLoading(false);
             }
           },
         },
@@ -414,7 +380,12 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     );
   };
 
-  if ((loading || auth0Loading) && !profile) {
+  const authActionLoading = auth0LoginMutation.isPending || auth0LogoutMutation.isPending || inspectTokensMutation.isPending;
+  const biometricTesting = testBiometricMutation.isPending;
+  const saving = saveProfileMutation.isPending;
+  const userInfoLoading = isUserInfoLoading;
+
+  if (isProfileLoading && !profile) {
     return (
       <SafeAreaView style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#4F46E5" />
@@ -477,7 +448,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               <TouchableOpacity
                 style={[styles.authActionButton, styles.logoutButton]}
                 activeOpacity={0.8}
-                onPress={handleAuth0Logout}
+                onPress={() => auth0LogoutMutation.mutate()}
                 disabled={authActionLoading}
               >
                 {authActionLoading ? (
@@ -490,7 +461,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               <TouchableOpacity
                 style={[styles.authActionButton, styles.loginButton]}
                 activeOpacity={0.8}
-                onPress={handleAuth0Login}
+                onPress={() => auth0LoginMutation.mutate()}
                 disabled={authActionLoading}
               >
                 {authActionLoading ? (
@@ -590,7 +561,8 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               <TouchableOpacity
                 style={styles.inspectTokenButton}
                 activeOpacity={0.8}
-                onPress={handleInspectTokens}
+                onPress={() => inspectTokensMutation.mutate()}
+                disabled={authActionLoading}
               >
                 <Text style={styles.inspectTokenButtonText}>🔍 Inspect Auth Tokens & Claims</Text>
               </TouchableOpacity>
@@ -690,7 +662,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               <TouchableOpacity
                 style={[styles.inspectTokenButton, { backgroundColor: '#F0FDF4' }]}
                 activeOpacity={0.8}
-                onPress={() => loadUserInfo(true)}
+                onPress={() => refetchUserInfo()}
                 disabled={userInfoLoading}
               >
                 {userInfoLoading ? (
@@ -755,7 +727,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
             </View>
             <Switch
               value={biometricEnabled}
-              onValueChange={handleToggleBiometric}
+              onValueChange={(val) => toggleBiometricMutation.mutate(val)}
               trackColor={{ false: '#E2E8F0', true: '#818CF8' }}
               thumbColor={biometricEnabled ? '#4F46E5' : '#94A3B8'}
               disabled={!biometrics?.isAvailable}
@@ -768,7 +740,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               (!biometrics?.isAvailable || biometricTesting) && styles.buttonDisabled,
             ]}
             activeOpacity={0.8}
-            onPress={handleTestBiometric}
+            onPress={() => testBiometricMutation.mutate()}
             disabled={!biometrics?.isAvailable || biometricTesting}
           >
             {biometricTesting ? (

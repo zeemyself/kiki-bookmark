@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -10,9 +10,9 @@ import {
   Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useAuth0 } from 'react-native-auth0';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   Collection,
@@ -34,45 +34,88 @@ export const CollectionDetailsScreen: React.FC<
 > = ({ route, navigation }) => {
   const { collectionId } = route.params;
   const db = useSQLiteContext();
+  const queryClient = useQueryClient();
   const { user: auth0User } = useAuth0();
-
-  const [collection, setCollection] = useState<Collection | null>(null);
-  const [allCollections, setAllCollections] = useState<Collection[]>([]);
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
-  const [loading, setLoading] = useState(true);
 
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
   const [isAddBookmarkModalVisible, setIsAddBookmarkModalVisible] = useState(false);
 
   const activeUserId = auth0User?.sub || CURRENT_USER.id;
 
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [col, bms, cols] = await Promise.all([
-        getCollectionById(db, collectionId),
-        getBookmarks(db, { collectionId, ownerId: activeUserId }),
-        getCollections(db, { ownerId: activeUserId }),
-      ]);
-      setCollection(col);
-      setBookmarks(bms);
-      setAllCollections(cols);
-    } catch (error) {
-      console.error('Error loading collection details:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [db, collectionId, activeUserId]);
+  // Query: Collection details
+  const {
+    data: collection,
+    isLoading: isCollectionLoading,
+  } = useQuery({
+    queryKey: ['collection', collectionId],
+    queryFn: async () => {
+      return getCollectionById(db, collectionId);
+    },
+  });
 
-  useFocusEffect(
-    useCallback(() => {
-      loadData();
-    }, [loadData])
-  );
+  // Query: Bookmarks within this collection
+  const {
+    data: bookmarks = [],
+    isLoading: isBookmarksLoading,
+  } = useQuery({
+    queryKey: ['bookmarks', { collectionId, ownerId: activeUserId }],
+    queryFn: async () => {
+      return getBookmarks(db, { collectionId, ownerId: activeUserId });
+    },
+  });
+
+  // Query: All collections (for modal/navigation)
+  const { data: allCollections = [] } = useQuery({
+    queryKey: ['collections', { ownerId: activeUserId }],
+    queryFn: async () => {
+      return getCollections(db, { ownerId: activeUserId });
+    },
+  });
+
+  // Mutation: Update Collection
+  const updateCollectionMutation = useMutation({
+    mutationFn: async (data: UpdateCollectionInput) => {
+      return updateCollection(db, collectionId, data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['collection', collectionId] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+    },
+  });
+
+  // Mutation: Delete Collection
+  const deleteCollectionMutation = useMutation({
+    mutationFn: async () => {
+      return deleteCollection(db, collectionId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+      queryClient.invalidateQueries({ queryKey: ['userStats'] });
+      navigation.goBack();
+    },
+  });
+
+  // Mutation: Create Bookmark in this collection
+  const createBookmarkMutation = useMutation({
+    mutationFn: async (data: CreateBookmarkInput) => {
+      return createBookmark(db, {
+        ...data,
+        collectionId,
+        ownerId: activeUserId,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+      queryClient.invalidateQueries({ queryKey: ['collection', collectionId] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['userStats'] });
+    },
+  });
 
   const handleUpdateCollection = async (data: UpdateCollectionInput) => {
-    await updateCollection(db, collectionId, data);
-    await loadData();
+    await updateCollectionMutation.mutateAsync(data);
   };
 
   const handleDeleteCollection = () => {
@@ -84,9 +127,8 @@ export const CollectionDetailsScreen: React.FC<
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: async () => {
-            await deleteCollection(db, collectionId);
-            navigation.goBack();
+          onPress: () => {
+            deleteCollectionMutation.mutate();
           },
         },
       ]
@@ -94,12 +136,7 @@ export const CollectionDetailsScreen: React.FC<
   };
 
   const handleCreateBookmark = async (data: CreateBookmarkInput) => {
-    await createBookmark(db, {
-      ...data,
-      collectionId,
-      ownerId: activeUserId,
-    });
-    await loadData();
+    await createBookmarkMutation.mutateAsync(data);
   };
 
   const renderBookmarkItem = ({ item }: { item: Bookmark }) => (
@@ -129,6 +166,8 @@ export const CollectionDetailsScreen: React.FC<
       </View>
     </TouchableOpacity>
   );
+
+  const loading = isCollectionLoading || isBookmarksLoading;
 
   if (loading && !collection) {
     return (

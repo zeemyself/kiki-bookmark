@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import {
   StyleSheet,
   Text,
@@ -10,13 +10,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth0 } from 'react-native-auth0';
 import { useSQLiteContext } from 'expo-sqlite';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   AUTH0_CONFIG,
   getBiometricCapabilities,
   authenticateWithBiometrics,
   isBiometricUnlockEnabled,
-  BiometricCapabilities,
 } from '../auth';
 import { upsertUserProfile, UserProfile } from '../db';
 
@@ -30,130 +30,124 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
     getCredentials,
   } = useAuth0();
 
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [isBiometricChecking, setIsBiometricChecking] = useState(false);
-  const [biometrics, setBiometrics] = useState<BiometricCapabilities | null>(null);
-  const [biometricEnabled, setBiometricEnabled] = useState(false);
-
-  // Check device biometric capabilities & SQLite settings
-  const checkBiometrics = useCallback(async () => {
-    try {
-      const [caps, enabled] = await Promise.all([
+  // Query: Device biometric capabilities & SQLite settings
+  const { data: biometricStatus } = useQuery({
+    queryKey: ['biometrics', 'status'],
+    queryFn: async () => {
+      const [capabilities, isEnabled] = await Promise.all([
         getBiometricCapabilities(),
         isBiometricUnlockEnabled(db),
       ]);
-      setBiometrics(caps);
-      setBiometricEnabled(enabled);
-    } catch (e) {
-      console.error('Failed to load biometric status on LoginScreen:', e);
-    }
-  }, [db]);
+      return { capabilities, isEnabled };
+    },
+  });
 
-  useEffect(() => {
-    checkBiometrics();
-  }, [checkBiometrics]);
+  const biometrics = biometricStatus?.capabilities;
 
-  // Sync Auth0 authenticated user into local SQLite
-  useEffect(() => {
-    if (user) {
-      const syncProfile = async () => {
-        try {
-          const profile: UserProfile = {
-            id: user.sub,
-            name: user.name || user.nickname || 'Auth0 User',
-            email: user.email || '',
-            role: 'Auth0 Authenticated Member',
-            avatarColor: '#4F46E5',
-            joinedAt: new Date().toISOString(),
-          };
-          await upsertUserProfile(db, profile);
-        } catch (e) {
-          console.error('Failed to sync Auth0 profile to SQLite:', e);
-        }
+  // Query: Sync Auth0 authenticated user into local SQLite declaratively
+  useQuery({
+    queryKey: ['userProfileSync', user?.sub],
+    enabled: !!user?.sub,
+    queryFn: async () => {
+      if (!user) return null;
+      const profile: UserProfile = {
+        id: user.sub,
+        name: user.name || user.nickname || 'Auth0 User',
+        email: user.email || '',
+        role: 'Auth0 Authenticated Member',
+        avatarColor: '#4F46E5',
+        joinedAt: new Date().toISOString(),
       };
-      syncProfile();
-    }
-  }, [user, db]);
+      await upsertUserProfile(db, profile);
+      return profile;
+    },
+  });
 
-  const handleLogin = async () => {
-    try {
-      setIsAuthenticating(true);
+  // Mutation: Auth0 Universal Login
+  const loginMutation = useMutation({
+    mutationFn: async () => {
       await authorize({
         scope: AUTH0_CONFIG.scope,
         audience: AUTH0_CONFIG.audience,
         redirectUrl: AUTH0_CONFIG.redirectUri,
       });
-    } catch (err: any) {
+    },
+    onError: (err: any) => {
       console.log('Auth0 Authorize error/cancel:', err);
       if (
         err?.message &&
         !err.message.includes('cancelled') &&
         !err.message.includes('User cancelled')
       ) {
-        Alert.alert('Authentication Notice', err.message || 'Authentication flow was not completed.');
+        Alert.alert(
+          'Authentication Notice',
+          err.message || 'Authentication flow was not completed.'
+        );
       }
-    } finally {
-      setIsAuthenticating(false);
-    }
-  };
+    },
+  });
 
-  const handleBiometricUnlock = async () => {
-    if (!biometrics?.isAvailable) {
-      Alert.alert(
-        'Biometric Unavailable',
-        'Biometric authentication is not enrolled or available on this device.'
-      );
-      return;
-    }
+  // Mutation: Biometric Unlock & Credential Restoration
+  const biometricUnlockMutation = useMutation({
+    mutationFn: async () => {
+      if (!biometrics?.isAvailable) {
+        Alert.alert(
+          'Biometric Unavailable',
+          'Biometric authentication is not enrolled or available on this device.'
+        );
+        return { handled: true };
+      }
 
-    try {
-      setIsBiometricChecking(true);
       const result = await authenticateWithBiometrics({
         promptMessage: `Unlock Kiki Bookmark with ${biometrics.biometricName}`,
         cancelLabel: 'Cancel',
         fallbackLabel: 'Use Device Passcode',
       });
 
-      if (result.success) {
-        // Biometric verified! Attempt to restore credentials from secure storage
-        try {
-          const creds = await getCredentials(
-            AUTH0_CONFIG.scope,
-            0,
-            { audience: AUTH0_CONFIG.audience }
-          );
-
-          if (creds?.accessToken) {
-            // Credentials retrieved and valid; Auth0 context will update or user can proceed
-            return;
-          }
-        } catch {
-          // No stored tokens yet in Keychain; prompt standard login
+      if (!result.success) {
+        if (result.error && !result.error.includes('user_cancel')) {
+          Alert.alert('Biometric Authentication', result.error);
         }
-
-        // If no credentials found or expired, trigger login
-        Alert.alert(
-          'Biometrics Verified',
-          'Biometric check succeeded. Please complete initial Auth0 login to seed your secure tokens.',
-          [
-            {
-              text: 'Log In Now',
-              onPress: handleLogin,
-            },
-          ]
-        );
-      } else if (result.error && !result.error.includes('user_cancel')) {
-        Alert.alert('Biometric Authentication', result.error);
+        return { handled: true };
       }
-    } catch (err: any) {
+
+      // Biometric verified! Attempt to restore credentials from secure storage
+      try {
+        const creds = await getCredentials(
+          AUTH0_CONFIG.scope,
+          0,
+          { audience: AUTH0_CONFIG.audience }
+        );
+
+        if (creds?.accessToken) {
+          // Credentials retrieved; Auth0 context will update
+          return { handled: true, success: true };
+        }
+      } catch {
+        // No stored tokens yet in Keychain; prompt standard login
+      }
+
+      // If no credentials found or expired, prompt login
+      Alert.alert(
+        'Biometrics Verified',
+        'Biometric check succeeded. Please complete initial Auth0 login to seed your secure tokens.',
+        [
+          {
+            text: 'Log In Now',
+            onPress: () => loginMutation.mutate(),
+          },
+        ]
+      );
+      return { handled: true, success: false };
+    },
+    onError: (err: any) => {
       console.error('Error during biometric unlock:', err);
       Alert.alert('Biometric Error', err?.message || 'Biometric authentication failed.');
-    } finally {
-      setIsBiometricChecking(false);
-    }
-  };
+    },
+  });
 
-  const isLoading = isAuthenticating || auth0Loading || isBiometricChecking;
+  const isLoading =
+    loginMutation.isPending || auth0Loading || biometricUnlockMutation.isPending;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -193,11 +187,11 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
           {biometrics?.isAvailable && (
             <TouchableOpacity
               style={[styles.biometricButton, isLoading && styles.buttonDisabled]}
-              onPress={handleBiometricUnlock}
+              onPress={() => biometricUnlockMutation.mutate()}
               disabled={isLoading}
               activeOpacity={0.85}
             >
-              {isBiometricChecking ? (
+              {biometricUnlockMutation.isPending ? (
                 <ActivityIndicator color="#4F46E5" size="small" />
               ) : (
                 <View style={styles.biometricButtonContent}>
@@ -212,11 +206,11 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
 
           <TouchableOpacity
             style={[styles.loginButton, isLoading && styles.buttonDisabled]}
-            onPress={handleLogin}
+            onPress={() => loginMutation.mutate()}
             disabled={isLoading}
             activeOpacity={0.85}
           >
-            {isAuthenticating || auth0Loading ? (
+            {loginMutation.isPending || auth0Loading ? (
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
               <Text style={styles.loginButtonText}>Log In with Auth0</Text>
@@ -365,3 +359,4 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
 });
+

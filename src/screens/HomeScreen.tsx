@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -11,9 +11,9 @@ import {
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useAuth0 } from 'react-native-auth0';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { RootStackScreenProps } from '../navigation/types';
 import {
   Bookmark,
@@ -37,52 +37,66 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
   navigation,
 }) => {
   const db = useSQLiteContext();
+  const queryClient = useQueryClient();
   const { user: auth0User } = useAuth0();
 
   const [activeTab, setActiveTab] = useState<TabType>('bookmarks');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCollectionFilter, setSelectedCollectionFilter] = useState<string | 'all' | 'unassigned'>('all');
 
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
-  const [collections, setCollections] = useState<Collection[]>([]);
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
-
   const [isAddBookmarkModalVisible, setIsAddBookmarkModalVisible] = useState(false);
   const [isAddCollectionModalVisible, setIsAddCollectionModalVisible] = useState(false);
 
   const activeUserId = auth0User?.sub || CURRENT_USER.id;
 
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-
+  // Query: Bookmarks
+  const { data: bookmarks = [], isLoading: isBookmarksLoading } = useQuery({
+    queryKey: ['bookmarks', { ownerId: activeUserId, searchQuery, collectionFilter: selectedCollectionFilter }],
+    queryFn: async () => {
       let colFilter: string | null | undefined = undefined;
       if (selectedCollectionFilter === 'unassigned') {
         colFilter = null;
       } else if (selectedCollectionFilter !== 'all') {
         colFilter = selectedCollectionFilter;
       }
+      return getBookmarks(db, {
+        search: searchQuery,
+        collectionId: colFilter,
+        ownerId: activeUserId,
+      });
+    },
+  });
 
-      const [bms, cols, userRecord] = await Promise.all([
-        getBookmarks(db, {
-          search: searchQuery,
-          collectionId: colFilter,
-          ownerId: activeUserId,
-        }),
-        getCollections(db, {
-          search: activeTab === 'collections' ? searchQuery : undefined,
-          ownerId: activeUserId,
-        }),
-        getUserProfile(db, activeUserId),
-      ]);
+  // Query: Filterable / Tab Collections
+  const { data: collections = [], isLoading: isCollectionsLoading } = useQuery({
+    queryKey: ['collections', { ownerId: activeUserId, search: activeTab === 'collections' ? searchQuery : undefined }],
+    queryFn: async () => {
+      return getCollections(db, {
+        search: activeTab === 'collections' ? searchQuery : undefined,
+        ownerId: activeUserId,
+      });
+    },
+  });
 
-      setBookmarks(bms);
-      setCollections(cols);
+  // Query: All collections (for filter pill row)
+  const { data: allCollections = [] } = useQuery({
+    queryKey: ['collections', { ownerId: activeUserId }],
+    queryFn: async () => {
+      return getCollections(db, {
+        ownerId: activeUserId,
+      });
+    },
+  });
 
+  // Query: User profile
+  const { data: profile } = useQuery({
+    queryKey: ['userProfile', activeUserId],
+    queryFn: async () => {
+      const userRecord = await getUserProfile(db, activeUserId);
       if (userRecord) {
-        setProfile(userRecord);
-      } else if (auth0User) {
+        return userRecord;
+      }
+      if (auth0User) {
         const newProfile: UserProfile = {
           id: auth0User.sub,
           name: auth0User.name || auth0User.nickname || 'Auth0 User',
@@ -92,31 +106,43 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
           joinedAt: new Date().toISOString(),
         };
         await upsertUserProfile(db, newProfile);
-        setProfile(newProfile);
-      } else {
-        setProfile(CURRENT_USER);
+        return newProfile;
       }
-    } catch (err) {
-      console.error('Error loading home screen data from SQLite:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [db, searchQuery, selectedCollectionFilter, activeTab, activeUserId, auth0User]);
+      return CURRENT_USER;
+    },
+  });
 
-  useFocusEffect(
-    useCallback(() => {
-      loadData();
-    }, [loadData])
-  );
+  // Mutation: Create Bookmark
+  const createBookmarkMutation = useMutation({
+    mutationFn: async (data: CreateBookmarkInput) => {
+      return createBookmark(db, { ...data, ownerId: activeUserId });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['userStats'] });
+    },
+  });
+
+  // Mutation: Create Collection
+  const createCollectionMutation = useMutation({
+    mutationFn: async (data: CreateCollectionInput) => {
+      return createCollection(db, { ...data, ownerId: activeUserId });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['userStats'] });
+    },
+  });
+
+  const loading = (activeTab === 'bookmarks' && isBookmarksLoading) || (activeTab === 'collections' && isCollectionsLoading);
 
   const handleCreateBookmark = async (data: CreateBookmarkInput) => {
-    await createBookmark(db, { ...data, ownerId: activeUserId });
-    await loadData();
+    await createBookmarkMutation.mutateAsync(data);
   };
 
   const handleCreateCollection = async (data: CreateCollectionInput) => {
-    await createCollection(db, { ...data, ownerId: activeUserId });
-    await loadData();
+    await createCollectionMutation.mutateAsync(data);
   };
 
   const initials = (auth0User?.name || profile?.name || 'KU')
@@ -125,6 +151,7 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
     .join('')
     .toUpperCase()
     .substring(0, 2);
+
 
   const renderBookmarkItem = ({ item }: { item: Bookmark }) => (
     <TouchableOpacity
@@ -347,7 +374,7 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
               </Text>
             </TouchableOpacity>
 
-            {collections.map((col) => {
+            {allCollections.map((col) => {
               const isSelected = selectedCollectionFilter === col.id;
               return (
                 <TouchableOpacity
@@ -444,7 +471,7 @@ export const HomeScreen: React.FC<RootStackScreenProps<'Home'>> = ({
         visible={isAddBookmarkModalVisible}
         onClose={() => setIsAddBookmarkModalVisible(false)}
         onSave={handleCreateBookmark}
-        collections={collections}
+        collections={allCollections}
         defaultCollectionId={
           selectedCollectionFilter !== 'all' && selectedCollectionFilter !== 'unassigned'
             ? selectedCollectionFilter
