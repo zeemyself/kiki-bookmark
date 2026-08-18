@@ -55,6 +55,13 @@ npm run typecheck
 npm test
 npm run test:watch
 npm run test:coverage
+
+# Releases & Versioning
+npm run release
+npm run release:dry
+npm run release:patch
+npm run release:minor
+npm run release:major
 ```
 
 ---

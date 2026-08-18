@@ -227,6 +227,25 @@ The repository includes a GitHub Actions workflow in [`.github/workflows/ci.yml`
 
 ---
 
+## 🏷️ Release Management
+
+The repository uses [`release-it`](https://github.com/release-it/release-it) with [`@release-it/conventional-changelog`](https://github.com/release-it/conventional-changelog) to automate semantic versioning, `CHANGELOG.md` generation, Expo `app.json` version bumping, and GitHub releases based on [Conventional Commits](https://www.conventionalcommits.org/).
+
+```bash
+# Interactive release prompt (with typecheck & test hooks)
+npm run release
+
+# Dry-run release to preview version bump & changelog
+npm run release:dry
+
+# Automated release bumps
+npm run release:patch
+npm run release:minor
+npm run release:major
+```
+
+---
+
 ## 📖 Architectural Decisions
 
 Refer to [`DECISIONS.md`](DECISIONS.md) for Architecture Decision Records (ADRs) covering:
