@@ -2,6 +2,14 @@
   "name": "kiki-bookmark",
   "version": "1.0.0",
   "main": "index.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zeemyself/kiki-bookmark.git"
+  },
+  "homepage": "https://github.com/zeemyself/kiki-bookmark#readme",
+  "bugs": {
+    "url": "https://github.com/zeemyself/kiki-bookmark/issues"
+  },
   "dependencies": {
     "@react-navigation/native": "^7.3.16",
     "@react-navigation/native-stack": "^7.18.8",
