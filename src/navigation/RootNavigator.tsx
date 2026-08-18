@@ -22,6 +22,7 @@ import {
   getBiometricCapabilities,
   authenticateWithBiometrics,
   isBiometricUnlockEnabled,
+  setBiometricUnlockEnabled,
   clearUserInfoSession,
   BiometricCapabilities,
 } from '../auth';
@@ -171,6 +172,7 @@ export const RootNavigator: React.FC = () => {
     try {
       setIsAuthenticating(true);
       clearUserInfoSession();
+      await setBiometricUnlockEnabled(db, false);
       setIsLocked(false);
       await clearSession({
         returnToUrl: AUTH0_CONFIG.logoutUri,

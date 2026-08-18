@@ -195,6 +195,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const auth0LogoutMutation = useMutation({
     mutationFn: async () => {
       clearUserInfoSession();
+      await setBiometricUnlockEnabled(db, false);
       await clearSession({
         returnToUrl: AUTH0_CONFIG.logoutUri,
       });

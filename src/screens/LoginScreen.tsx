@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth0 } from 'react-native-auth0';
@@ -17,8 +18,15 @@ import {
   getBiometricCapabilities,
   authenticateWithBiometrics,
   isBiometricUnlockEnabled,
+  setBiometricUnlockEnabled,
+  BiometricCapabilities,
 } from '../auth';
 import { upsertUserProfile, UserProfile } from '../db';
+
+type BiometricAutoState =
+  | 'checking'     // checking for stored credentials + biometric setting
+  | 'prompting'    // biometric prompt is active
+  | 'unavailable'; // no stored creds, biometric not enabled, or biometric failed; show normal login
 
 export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
   const db = useSQLiteContext();
@@ -30,19 +38,19 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
     getCredentials,
   } = useAuth0();
 
-  // Query: Device biometric capabilities & SQLite settings
-  const { data: biometricStatus } = useQuery({
-    queryKey: ['biometrics', 'status'],
-    queryFn: async () => {
-      const [capabilities, isEnabled] = await Promise.all([
-        getBiometricCapabilities(),
-        isBiometricUnlockEnabled(db),
-      ]);
-      return { capabilities, isEnabled };
-    },
-  });
+  const [autoState, setAutoState] = useState<BiometricAutoState>('checking');
+  const [biometrics, setBiometrics] = useState<BiometricCapabilities | null>(null);
+  const hasAttemptedAutoRef = useRef(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
 
-  const biometrics = biometricStatus?.capabilities;
+  // Fade in content after initial check
+  const fadeIn = useCallback(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  }, [fadeAnim]);
 
   // Query: Sync Auth0 authenticated user into local SQLite declaratively
   useQuery({
@@ -63,6 +71,86 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
     },
   });
 
+  // Auto-biometric: check for stored credentials + biometric enabled, then prompt
+  const attemptAutoBiometric = useCallback(async () => {
+    try {
+      const [caps, isEnabled] = await Promise.all([
+        getBiometricCapabilities(),
+        isBiometricUnlockEnabled(db),
+      ]);
+      setBiometrics(caps);
+
+      // If biometric not enabled in settings, or hardware not available, skip
+      if (!isEnabled || !caps.isAvailable) {
+        setAutoState('unavailable');
+        fadeIn();
+        return;
+      }
+
+      // Check if we have stored Auth0 credentials in the Keychain
+      let hasStoredCredentials = false;
+      try {
+        const creds = await getCredentials(
+          AUTH0_CONFIG.scope,
+          0,
+          { audience: AUTH0_CONFIG.audience }
+        );
+        hasStoredCredentials = !!creds?.accessToken;
+      } catch {
+        // No stored credentials
+      }
+
+      if (!hasStoredCredentials) {
+        // No previous session to restore — show normal login
+        setAutoState('unavailable');
+        fadeIn();
+        return;
+      }
+
+      // We have credentials + biometric enabled → auto-prompt
+      setAutoState('prompting');
+
+      const result = await authenticateWithBiometrics({
+        promptMessage: `Unlock Kiki Bookmark with ${caps.biometricName}`,
+        cancelLabel: 'Cancel',
+        fallbackLabel: 'Use Device Passcode',
+      });
+
+      if (result.success) {
+        // Restore credentials — Auth0 context will re-hydrate automatically
+        // via getCredentials. The RootNavigator will see `user` and switch screens.
+        try {
+          await getCredentials(
+            AUTH0_CONFIG.scope,
+            0,
+            { audience: AUTH0_CONFIG.audience }
+          );
+        } catch {
+          // Token might have expired; fall through to normal login
+          setAutoState('unavailable');
+          fadeIn();
+        }
+        // If getCredentials succeeded, Auth0 context updates and we navigate away
+        return;
+      }
+
+      // Biometric was cancelled or failed — show normal login
+      setAutoState('unavailable');
+      fadeIn();
+    } catch (err) {
+      console.error('Auto biometric check error:', err);
+      setAutoState('unavailable');
+      fadeIn();
+    }
+  }, [db, getCredentials, fadeIn]);
+
+  // Run auto-biometric once on mount
+  useEffect(() => {
+    if (hasAttemptedAutoRef.current) return;
+    hasAttemptedAutoRef.current = true;
+    attemptAutoBiometric();
+  }, [attemptAutoBiometric]);
+
   // Mutation: Auth0 Universal Login
   const loginMutation = useMutation({
     mutationFn: async () => {
@@ -71,6 +159,38 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
         audience: AUTH0_CONFIG.audience,
         redirectUrl: AUTH0_CONFIG.redirectUri,
       });
+    },
+    onSuccess: async () => {
+      // After first login, offer biometric setup if device supports it
+      try {
+        const [caps, alreadyEnabled] = await Promise.all([
+          getBiometricCapabilities(),
+          isBiometricUnlockEnabled(db),
+        ]);
+
+        if (caps.isAvailable && !alreadyEnabled) {
+          Alert.alert(
+            `Enable ${caps.biometricName}?`,
+            `Use ${caps.biometricName} to quickly unlock Kiki Bookmark next time.`,
+            [
+              { text: 'Skip', style: 'cancel' },
+              {
+                text: 'Enable',
+                onPress: async () => {
+                  const result = await authenticateWithBiometrics({
+                    promptMessage: `Set up ${caps.biometricName} for Kiki Bookmark`,
+                  });
+                  if (result.success) {
+                    await setBiometricUnlockEnabled(db, true);
+                  }
+                },
+              },
+            ]
+          );
+        }
+      } catch (err) {
+        console.log('Biometric setup prompt skipped:', err);
+      }
     },
     onError: (err: any) => {
       console.log('Auth0 Authorize error/cancel:', err);
@@ -87,71 +207,35 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
     },
   });
 
-  // Mutation: Biometric Unlock & Credential Restoration
-  const biometricUnlockMutation = useMutation({
-    mutationFn: async () => {
-      if (!biometrics?.isAvailable) {
-        Alert.alert(
-          'Biometric Unavailable',
-          'Biometric authentication is not enrolled or available on this device.'
-        );
-        return { handled: true };
-      }
+  const isLoading = loginMutation.isPending || auth0Loading;
 
-      const result = await authenticateWithBiometrics({
-        promptMessage: `Unlock Kiki Bookmark with ${biometrics.biometricName}`,
-        cancelLabel: 'Cancel',
-        fallbackLabel: 'Use Device Passcode',
-      });
-
-      if (!result.success) {
-        if (result.error && !result.error.includes('user_cancel')) {
-          Alert.alert('Biometric Authentication', result.error);
-        }
-        return { handled: true };
-      }
-
-      // Biometric verified! Attempt to restore credentials from secure storage
-      try {
-        const creds = await getCredentials(
-          AUTH0_CONFIG.scope,
-          0,
-          { audience: AUTH0_CONFIG.audience }
-        );
-
-        if (creds?.accessToken) {
-          // Credentials retrieved; Auth0 context will update
-          return { handled: true, success: true };
-        }
-      } catch {
-        // No stored tokens yet in Keychain; prompt standard login
-      }
-
-      // If no credentials found or expired, prompt login
-      Alert.alert(
-        'Biometrics Verified',
-        'Biometric check succeeded. Please complete initial Auth0 login to seed your secure tokens.',
-        [
-          {
-            text: 'Log In Now',
-            onPress: () => loginMutation.mutate(),
-          },
-        ]
-      );
-      return { handled: true, success: false };
-    },
-    onError: (err: any) => {
-      console.error('Error during biometric unlock:', err);
-      Alert.alert('Biometric Error', err?.message || 'Biometric authentication failed.');
-    },
-  });
-
-  const isLoading =
-    loginMutation.isPending || auth0Loading || biometricUnlockMutation.isPending;
+  // Show a minimal loading state while checking for stored credentials
+  if (autoState === 'checking' || autoState === 'prompting') {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.content}>
+          <View style={styles.heroSection}>
+            <View style={styles.logoBadge}>
+              <Text style={styles.logoIcon}>🔖</Text>
+            </View>
+            <Text style={styles.brandTitle}>Kiki Bookmark</Text>
+            {autoState === 'prompting' && biometrics ? (
+              <Text style={styles.brandSubtitle}>
+                Verifying with {biometrics.biometricName}…
+              </Text>
+            ) : (
+              <Text style={styles.brandSubtitle}>Checking session…</Text>
+            )}
+          </View>
+          <ActivityIndicator size="large" color="#4F46E5" style={{ marginTop: 24 }} />
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
+      <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
         {/* Branding Hero */}
         <View style={styles.heroSection}>
           <View style={styles.logoBadge}>
@@ -161,48 +245,28 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
           <Text style={styles.brandSubtitle}>
             Save, organize, and sync your favorite links.
           </Text>
-
-          {/* Biometric Capability Status Chip */}
-          {biometrics?.isAvailable && (
-            <View style={styles.biometricBadge}>
-              <Text style={styles.biometricBadgeIcon}>{biometrics.biometricIcon}</Text>
-              <Text style={styles.biometricBadgeText}>
-                {biometrics.biometricName} Enabled
-              </Text>
-            </View>
-          )}
         </View>
 
         {/* Error notice if present */}
-        {auth0Error && (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>
-              {auth0Error.message || 'Authentication error encountered.'}
-            </Text>
-          </View>
-        )}
+        {(() => {
+          const rawErrorMessage =
+            typeof auth0Error === 'string' ? auth0Error : auth0Error?.message;
+          const isIgnoredError =
+            !rawErrorMessage ||
+            rawErrorMessage.toLowerCase().includes('no credentials') ||
+            rawErrorMessage.toLowerCase().includes('cancelled');
+
+          if (isIgnoredError || !rawErrorMessage) return null;
+
+          return (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{rawErrorMessage}</Text>
+            </View>
+          );
+        })()}
 
         {/* Action Area */}
         <View style={styles.actionSection}>
-          {biometrics?.isAvailable && (
-            <TouchableOpacity
-              style={[styles.biometricButton, isLoading && styles.buttonDisabled]}
-              onPress={() => biometricUnlockMutation.mutate()}
-              disabled={isLoading}
-              activeOpacity={0.85}
-            >
-              {biometricUnlockMutation.isPending ? (
-                <ActivityIndicator color="#4F46E5" size="small" />
-              ) : (
-                <View style={styles.biometricButtonContent}>
-                  <Text style={styles.biometricButtonIcon}>{biometrics.biometricIcon}</Text>
-                  <Text style={styles.biometricButtonText}>
-                    Unlock with {biometrics.biometricName}
-                  </Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          )}
 
           <TouchableOpacity
             style={[styles.loginButton, isLoading && styles.buttonDisabled]}
@@ -217,7 +281,7 @@ export const LoginScreen: React.FC<RootStackScreenProps<'Login'>> = () => {
             )}
           </TouchableOpacity>
         </View>
-      </View>
+      </Animated.View>
     </SafeAreaView>
   );
 };
@@ -288,55 +352,7 @@ const styles = StyleSheet.create({
     maxWidth: 320,
     gap: 12,
   },
-  biometricBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#EEF2FF',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#C7D2FE',
-  },
-  biometricBadgeIcon: {
-    fontSize: 14,
-    marginRight: 6,
-  },
-  biometricBadgeText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#4338CA',
-  },
-  biometricButton: {
-    backgroundColor: '#EEF2FF',
-    borderWidth: 1.5,
-    borderColor: '#6366F1',
-    paddingVertical: 15,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#4F46E5',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  biometricButtonContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  biometricButtonIcon: {
-    fontSize: 18,
-    marginRight: 8,
-  },
-  biometricButtonText: {
-    color: '#4338CA',
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
+
   loginButton: {
     backgroundColor: '#4F46E5',
     paddingVertical: 16,

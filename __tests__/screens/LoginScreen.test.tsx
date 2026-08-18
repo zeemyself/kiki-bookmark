@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react-native';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LoginScreen } from '../../src/screens/LoginScreen';
 
@@ -85,21 +85,23 @@ describe('LoginScreen (React Query)', () => {
       biometricIcon: '🔒',
     });
     mockIsBiometricUnlockEnabled.mockResolvedValue(false);
+    mockGetCredentials.mockRejectedValue(new Error('No credentials'));
   });
 
-  it('renders branding elements and Auth0 login button', async () => {
+  it('renders branding elements and Auth0 login button when no biometrics', async () => {
     await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
 
-    expect(screen.getByText('Kiki Bookmark')).toBeTruthy();
-    expect(screen.getByText('Save, organize, and sync your favorite links.')).toBeTruthy();
-    expect(screen.getByText('Log In with Auth0')).toBeTruthy();
+    // After auto-check resolves (biometrics unavailable), shows normal login
+    expect(await screen.findByText('Kiki Bookmark')).toBeTruthy();
+    expect(await screen.findByText('Save, organize, and sync your favorite links.')).toBeTruthy();
+    expect(await screen.findByText('Log In with Auth0')).toBeTruthy();
   });
 
   it('handles Auth0 login mutation on button press', async () => {
     mockAuthorize.mockResolvedValueOnce({ accessToken: 'test-token' });
 
     await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
-    const loginButton = screen.getByText('Log In with Auth0');
+    const loginButton = await screen.findByText('Log In with Auth0');
 
     fireEvent.press(loginButton);
 
@@ -112,39 +114,93 @@ describe('LoginScreen (React Query)', () => {
     });
   });
 
-  it('renders biometric button when biometrics are available', async () => {
-    mockGetBiometricCapabilities.mockResolvedValueOnce({
+  it('auto-triggers biometric when credentials exist and biometric is enabled', async () => {
+    mockGetBiometricCapabilities.mockResolvedValue({
       isAvailable: true,
       biometricType: 'FACIAL_RECOGNITION',
       biometricName: 'Face ID',
       biometricIcon: '👤',
     });
+    mockIsBiometricUnlockEnabled.mockResolvedValue(true);
+    mockGetCredentials.mockResolvedValue({ accessToken: 'stored-token' });
+    mockAuthenticateWithBiometrics.mockResolvedValue({ success: true });
 
     await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
 
-    expect(await screen.findByText('Face ID Enabled')).toBeTruthy();
-    expect(await screen.findByText('Unlock with Face ID')).toBeTruthy();
+    // Biometric should auto-fire without any button press
+    await waitFor(() => {
+      expect(mockAuthenticateWithBiometrics).toHaveBeenCalledWith(
+        expect.objectContaining({
+          promptMessage: 'Unlock Kiki Bookmark with Face ID',
+        })
+      );
+      expect(mockGetCredentials).toHaveBeenCalled();
+    });
   });
 
-  it('handles biometric unlock flow via mutation', async () => {
-    mockGetBiometricCapabilities.mockResolvedValueOnce({
+  it('shows only Auth0 login button after biometric auto-prompt is cancelled', async () => {
+    mockGetBiometricCapabilities.mockResolvedValue({
       isAvailable: true,
       biometricType: 'FINGERPRINT',
       biometricName: 'Touch ID',
       biometricIcon: '👆',
     });
-    mockAuthenticateWithBiometrics.mockResolvedValueOnce({ success: true });
-    mockGetCredentials.mockResolvedValueOnce({ accessToken: 'stored-token' });
+    mockIsBiometricUnlockEnabled.mockResolvedValue(true);
+    mockGetCredentials.mockResolvedValue({ accessToken: 'stored-token' });
+    // Biometric fails/cancelled
+    mockAuthenticateWithBiometrics.mockResolvedValue({ success: false, error: 'user_cancel' });
 
     await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
-    const biometricButton = await screen.findByText('Unlock with Touch ID');
 
-    fireEvent.press(biometricButton);
+    // After auto-prompt fails, only Auth0 login button should appear (no biometric button)
+    expect(await screen.findByText('Log In with Auth0')).toBeTruthy();
+    expect(screen.queryByText('Retry Touch ID')).toBeNull();
+  });
 
-    await waitFor(() => {
-      expect(mockAuthenticateWithBiometrics).toHaveBeenCalled();
-      expect(mockGetCredentials).toHaveBeenCalled();
+  it('does not show biometric UI when no stored credentials', async () => {
+    mockGetBiometricCapabilities.mockResolvedValue({
+      isAvailable: true,
+      biometricType: 'FACIAL_RECOGNITION',
+      biometricName: 'Face ID',
+      biometricIcon: '👤',
     });
+    mockIsBiometricUnlockEnabled.mockResolvedValue(true);
+    // No stored credentials
+    mockGetCredentials.mockRejectedValue(new Error('No credentials'));
+
+    await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
+
+    // Should skip biometric and show normal login
+    expect(await screen.findByText('Log In with Auth0')).toBeTruthy();
+    expect(mockAuthenticateWithBiometrics).not.toHaveBeenCalled();
+  });
+
+  it('does not display "No credentials were found in the store." error banner', async () => {
+    mockError = new Error('No credentials were found in the store.');
+
+    await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
+
+    expect(await screen.findByText('Log In with Auth0')).toBeTruthy();
+    expect(screen.queryByText('No credentials were found in the store.')).toBeNull();
+  });
+
+  it('does not display cancelled error banner', async () => {
+    mockError = new Error('User cancelled');
+
+    await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
+
+    expect(await screen.findByText('Log In with Auth0')).toBeTruthy();
+    expect(screen.queryByText('User cancelled')).toBeNull();
+  });
+
+  it('displays legitimate authentication errors', async () => {
+    mockError = new Error('Invalid authorization code.');
+
+    await renderWithClient(<LoginScreen navigation={{} as any} route={{} as any} />);
+
+    expect(await screen.findByText('Log In with Auth0')).toBeTruthy();
+    expect(await screen.findByText('Invalid authorization code.')).toBeTruthy();
   });
 });
+
 
