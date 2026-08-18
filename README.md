@@ -1,13 +1,47 @@
 # 🔖 Kiki Bookmark
 
 > [!IMPORTANT]
-> **Remark:** This repository is currently public solely for interview assignment evaluation purposes. Once the review process is completed, the repository will be changed back to private.
+> **Remark for Reviewers:** This repository is public solely for evaluation and grading purposes. Once the review process is completed, the repository will be reverted to private.
 
 A secure, offline-first cross-platform mobile bookmark and collection manager built with **Expo (SDK 57)**, **React Native (0.86)**, **React 19**, and **TypeScript**.
 
 ---
 
-## 🌟 Features
+## 🎯 Reviewer Quick Start & Target Platform
+
+- **Primary Target Platform:** **Android** (API 24+ / Tested on Android 14 API 34).
+- **Secondary Target Platform:** **iOS** (iOS 17+ / Compatible via Expo & CocoaPods).
+- **Installable Build (Pre-built Debug APK):**
+  - An installable Android build is provided in this repository at [`app/app-debug.apk`](app/app-debug.apk).
+  - You can test the app immediately without building native toolchains or setting up JDK/Android Studio.
+
+### Quick Install via ADB
+```bash
+# Ensure your Android emulator or physical device is connected
+adb install app/app-debug.apk
+```
+*Or drag and drop `app/app-debug.apk` directly onto a running Android emulator.*
+
+---
+
+## ⚖️ What Was Completed vs. Skipped & Why
+
+To assist the review and grading process, here is a transparent summary of what was completed versus what was intentionally omitted:
+
+| Scope Area | Status | Implementation Details & Rationale |
+| :--- | :---: | :--- |
+| **OIDC Auth (Auth0 + PKCE)** | ✅ Completed | Universal Login via OAuth 2.0 with **PKCE (`S256`)**, ID token claim decoder, user profile metadata, and universal logout via `react-native-auth0`. |
+| **Secure Token Storage** | ✅ Completed | Tokens stored using hardware-backed keystores (Android KeyStore / EncryptedSharedPreferences, iOS Keychain Secure Enclave) via Auth0 `CredentialsManager`. |
+| **Biometric Security** | ✅ Completed | Integrated with `expo-local-authentication`. Features both an **App-Level Biometric Lock** (on launch/resume) and **Per-Collection Privacy Lock** for sensitive bookmarks. |
+| **Offline-First Persistence** | ✅ Completed | Modern `expo-sqlite` repository architecture with parameterized SQL queries, foreign keys, cascade deletes, and automated migration runner (`migrateDbIfNeeded`). |
+| **Bookmark & Collection CRUD** | ✅ Completed | Create, read, update, delete, tag, favorite, search/filter bookmarks, and assign color-coded collections. External links open via secure system browser. |
+| **Automated Test Suite** | ✅ Completed | 24 automated unit & integration tests across 7 test suites (auth, database, screens, userinfo) using Jest, `jest-expo`, and `@testing-library/react-native`. |
+| **An "everything" screen** | ⏭️ *Skipped* | Collections shown together with the bookmarks inside them, rather than two lists. **Why:** Focused on dedicated collection filtering tabs and modular list views for better biometric privacy isolation and cleaner mobile layout. |
+| **Full-text search** | ⏭️ *Skipped* | Across bookmark titles and notes. **Why:** Implemented direct substring search across titles, URLs, and tags; omitted SQLite FTS5 full-text indexing to keep the schema lightweight and performant. |
+
+---
+
+## 🌟 Key Features
 
 - 🔐 **OIDC Authentication with Auth0:**
   - Secure login flow powered by Universal Login and OAuth 2.0 with **PKCE (`S256`)**.
@@ -15,7 +49,7 @@ A secure, offline-first cross-platform mobile bookmark and collection manager bu
   - Seamless token rotation and authenticated session management.
 - 🛡️ **Biometric Security:**
   - Integrated biometric authentication (Face ID, Touch ID, Android Biometrics) via `expo-local-authentication`.
-  - App-level biometric lock overlay on launch/resume.
+  - App-level biometric lock overlay on launch and resume from background.
   - Granular privacy protection for individual sensitive bookmark collections.
 - 💾 **Local-First SQLite Persistence:**
   - High-performance on-device storage utilizing modern `expo-sqlite` (`SQLiteProvider` and repository pattern).
@@ -53,6 +87,8 @@ A secure, offline-first cross-platform mobile bookmark and collection manager bu
 
 ```
 kiki-bookmark/
+├── app/
+│   └── app-debug.apk       # Pre-built Android debug APK for reviewers
 ├── assets/                 # App icons, splash screens, adaptive icons
 ├── src/
 │   ├── auth/               # Auth0 configuration, biometrics helper, userinfo mapping
@@ -65,6 +101,7 @@ kiki-bookmark/
 ├── app.json                # Expo config, native plugins, and permissions
 ├── eas.json                # Expo Application Services (EAS) build profiles
 ├── DECISIONS.md            # Architecture Decision Records (ADRs)
+├── AUTH_DESIGN.md          # Detailed OIDC & Biometric Security Design Document
 └── package.json            # Dependencies and scripts
 ```
 
@@ -72,25 +109,23 @@ kiki-bookmark/
 
 ## 📋 Prerequisites
 
-Ensure you have the following installed on your development machine:
+To run from source code:
 
 - **Node.js**: `v20.x` or higher (Active LTS recommended)
 - **Package Manager**: `npm` (v10+)
 - **Mobile Development Environments**:
-  - **iOS (macOS only):**
-    - Xcode 16+
-    - Command Line Tools
-    - CocoaPods (`sudo gem install cocoapods` or via Homebrew)
-    - Simulator runtime installed (iOS 17+)
-  - **Android:**
+  - **Android (Primary Target):**
     - Android Studio with Android SDK (API Level 34+)
-    - Android SDK Command-line Tools & Build-Tools
     - Java Development Kit (JDK 17)
-    - Configured Android Emulator or physical test device with USB debugging
+    - Configured Android Emulator or physical test device with USB debugging enabled
+  - **iOS (macOS only):**
+    - Xcode 16+ & Command Line Tools
+    - CocoaPods (`sudo gem install cocoapods` or Homebrew)
+    - iOS Simulator (iOS 17+)
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Setup & Run Steps (Clean Checkout)
 
 ### 1. Clone the Repository
 
@@ -105,125 +140,80 @@ cd kiki-bookmark
 npm install
 ```
 
-### 3. Auth0 Configuration
+### 3. Auth0 Configuration (Pre-configured)
 
-The application is pre-configured with default Auth0 development credentials in [`src/auth/config.ts`](src/auth/config.ts) and [`app.json`](app.json).
+The application comes pre-configured with active development credentials in [`src/auth/config.ts`](src/auth/config.ts) and [`app.json`](app.json), enabling immediate login without manual credential setup.
 
-If you are setting up your own Auth0 tenant:
-1. Create a **Native Application** in the [Auth0 Dashboard](https://manage.auth0.com/).
-2. Add the following to **Allowed Callback URLs** and **Allowed Logout URLs**:
-   ```
-   com.bbl.bookmarks://oauth/callback
-   ```
-3. Update [`src/auth/config.ts`](src/auth/config.ts):
-   ```typescript
-   export const AUTH0_CONFIG = {
-     domain: 'YOUR_AUTH0_DOMAIN',
-     clientId: 'YOUR_AUTH0_CLIENT_ID',
-     // ...
-   };
-   ```
-4. Update the `react-native-auth0` plugin configuration in [`app.json`](app.json):
-   ```json
-   "plugins": [
-     [
-       "react-native-auth0",
-       {
-         "domain": "YOUR_AUTH0_DOMAIN",
-         "customScheme": "com.bbl.bookmarks"
-       }
-     ]
-   ]
-   ```
+*(Optional: If you wish to use your own Auth0 tenant, configure the domain, client ID, and callback URL `com.bbl.bookmarks://oauth/callback` in `src/auth/config.ts` and `app.json`.)*
 
----
+### 4. Running the App
 
-## 📱 Running the Application
-
-### Development Build (iOS Simulator)
-
-Because this app utilizes native modules (`react-native-auth0`, `expo-sqlite`, `expo-local-authentication`), run it using native runtime builds:
-
+#### Android (Recommended)
 ```bash
-# Builds and launches the iOS Simulator
-npm run ios
-```
-
-> **Note:** For iOS on macOS, the build command will automatically run `npx expo prebuild` and install native CocoaPods.
-
-### Development Build (Android Emulator)
-
-```bash
-# Starts Android emulator and launches the debug build
+# Starts the Android emulator and launches the debug build
 npm run android
 ```
 
-### Start Metro Bundler
+#### iOS (macOS only)
+```bash
+# Builds native CocoaPods and launches the iOS Simulator
+npm run ios
+```
 
-If the native build is already installed on your device or simulator:
-
+#### Start Metro Bundler (if build is already installed)
 ```bash
 npm start
 ```
 
 ---
 
-## 🏗️ Building for Production / Release
+## 🧪 Running Tests & Quality Checks
 
-### Local Native Builds
-
-#### iOS Release Build
-```bash
-npx expo run:ios --configuration Release
-```
-
-#### Android Release APK / Bundle
-```bash
-# Release APK
-npx expo run:android --variant release
-```
-
-### Cloud Builds via EAS (Expo Application Services)
-
-The repository includes pre-configured profiles in [`eas.json`](eas.json):
+Run the automated test suites and static type checks:
 
 ```bash
-# Install EAS CLI globally if needed
-npm install -g eas-cli
-
-# Log in to your Expo account
-eas login
-
-# Build internal preview (APK for Android / Simulator/TestFlight for iOS)
-eas build --profile preview --platform all
-
-# Build production bundle (AAB for Google Play / IPA for App Store)
-eas build --profile production --platform all
-```
-
----
-
-## 🧪 Testing & Code Quality
-
-```bash
-# Run TypeScript typecheck
+# 1. Run TypeScript typecheck
 npm run typecheck
 
-# Run test suite with Jest
+# 2. Run Jest unit and integration test suites
 npm test
 
-# Run tests in interactive watch mode
+# 3. Run Jest tests in interactive watch mode
 npm run test:watch
 
-# Run tests and generate code coverage report
+# 4. Generate test coverage report
 npm run test:coverage
 ```
 
 ### Continuous Integration (CI)
 
-The repository includes a GitHub Actions workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) that automatically runs:
-- TypeScript type checking (`tsc --noEmit`)
-- Jest test suite with coverage report generation and artifact upload
+A GitHub Actions workflow is configured in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) to automatically run typechecks and the test suite with coverage reporting on pull requests and main pushes.
+
+---
+
+## 🏗️ Production & Cloud Builds
+
+### Local Release Builds
+
+```bash
+# Android Release APK
+npx expo run:android --variant release
+
+# iOS Release Build
+npx expo run:ios --configuration Release
+```
+
+### Cloud Builds via EAS
+
+Pre-configured profiles exist in [`eas.json`](eas.json):
+
+```bash
+# Build Android APK preview in EAS Cloud
+eas build --profile preview --platform android
+
+# Build all platforms
+eas build --profile preview --platform all
+```
 
 ---
 
@@ -248,10 +238,9 @@ npm run release:major
 
 ## 📖 Architectural Decisions
 
-Refer to [`DECISIONS.md`](DECISIONS.md) for Architecture Decision Records (ADRs) covering:
-- **ADR 01:** Redirect URI Scheme Selection (`com.bbl.bookmarks://oauth/callback` with PKCE `S256`).
-- **ADR 02:** Authentication SDK Selection (`react-native-auth0` with hardware-backed Secure Enclave / KeyStore encryption).
-- Detailed OIDC sequence flows and security design in [`AUTH_DESIGN.md`](AUTH_DESIGN.md).
+Refer to the dedicated documentation files for in-depth design specifications:
+- [`DECISIONS.md`](DECISIONS.md) — Architecture Decision Records (ADR 01: Redirect URI Scheme, ADR 02: Auth SDK & Secure Storage).
+- [`AUTH_DESIGN.md`](AUTH_DESIGN.md) — Comprehensive OIDC Authentication, PKCE flow diagrams, and Biometric Security architecture.
 
 ---
 
