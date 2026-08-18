@@ -144,4 +144,21 @@ describe('ProfileScreen (React Query)', () => {
 
     expect(await screen.findByText('🚪 Sign Out from Auth0')).toBeTruthy();
   });
+
+  it('does not render Edit Profile button or modal', async () => {
+    await renderWithClient(<ProfileScreen navigation={{} as any} route={{} as any} />);
+
+    expect(screen.queryByText(/edit profile/i)).toBeNull();
+    expect(screen.queryByText('✏️ Edit Profile Info')).toBeNull();
+  });
+
+  it('does not display sensitive tokens or token inspection controls', async () => {
+    await renderWithClient(<ProfileScreen navigation={{} as any} route={{} as any} />);
+
+    expect(screen.queryByText(/inspect auth tokens/i)).toBeNull();
+    expect(screen.queryByText('test-access-token')).toBeNull();
+    expect(screen.queryByText('test-id-token')).toBeNull();
+    expect(screen.queryByText('test-client-id')).toBeNull();
+  });
 });
+

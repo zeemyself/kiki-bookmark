@@ -171,7 +171,7 @@ export const CollectionDetailsScreen: React.FC<
 
   if (loading && !collection) {
     return (
-      <SafeAreaView style={styles.centerContainer}>
+      <SafeAreaView style={styles.centerContainer} edges={['bottom', 'left', 'right']}>
         <ActivityIndicator size="large" color="#4F46E5" />
       </SafeAreaView>
     );
@@ -179,7 +179,7 @@ export const CollectionDetailsScreen: React.FC<
 
   if (!collection) {
     return (
-      <SafeAreaView style={styles.centerContainer}>
+      <SafeAreaView style={styles.centerContainer} edges={['bottom', 'left', 'right']}>
         <Text style={styles.emptyTitle}>Collection not found</Text>
         <TouchableOpacity
           style={styles.backButton}
@@ -194,7 +194,7 @@ export const CollectionDetailsScreen: React.FC<
   const collectionColor = collection.color || '#4F46E5';
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['bottom', 'left', 'right']}>
       <FlatList
         data={bookmarks}
         keyExtractor={(item) => item.id}
@@ -300,7 +300,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
   },
   listContent: {
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingTop: 16,
     paddingBottom: 40,
   },
   header: {

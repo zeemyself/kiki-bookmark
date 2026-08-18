@@ -48,6 +48,9 @@ npm start
 npm run ios
 npm run android
 
+# Build standalone debug APK
+npm run build:android
+
 # Type checking
 npm run typecheck
 

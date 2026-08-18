@@ -11,16 +11,30 @@ A secure, offline-first cross-platform mobile bookmark and collection manager bu
 
 - **Primary Target Platform:** **Android** (API 24+ / Tested on Android 14 API 34).
 - **Secondary Target Platform:** **iOS** (iOS 17+ / Compatible via Expo & CocoaPods).
-- **Installable Build (Pre-built Debug APK):**
-  - An installable Android build is provided in this repository at [`app/app-debug.apk`](app/app-debug.apk).
-  - You can test the app immediately without building native toolchains or setting up JDK/Android Studio.
 
-### Quick Install via ADB
+### 🚀 Quick Build & Install (Android)
+
+1. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+2. **Build the Debug APK:**
+   ```bash
+   npm run build:android
+   ```
+   *This automatically scaffolds the native `android/` directory via Expo Prebuild, runs Gradle `assembleDebug`, and places the resulting binary at `app/app-debug.apk`.*
+
+3. **Install & Run on Emulator or Connected Device:**
+   ```bash
+   adb install app/app-debug.apk
+   ```
+   *Or drag and drop `app/app-debug.apk` directly onto a running Android emulator.*
+
+Alternatively, to build and launch directly in one command:
 ```bash
-# Ensure your Android emulator or physical device is connected
-adb install app/app-debug.apk
+npm run android
 ```
-*Or drag and drop `app/app-debug.apk` directly onto a running Android emulator.*
 
 ---
 
@@ -35,9 +49,9 @@ To assist the review and grading process, here is a transparent summary of what 
 | **Biometric Security** | ✅ Completed | Integrated with `expo-local-authentication`. Features both an **App-Level Biometric Lock** (on launch/resume) and **Per-Collection Privacy Lock** for sensitive bookmarks. |
 | **Offline-First Persistence** | ✅ Completed | Modern `expo-sqlite` repository architecture with parameterized SQL queries, foreign keys, cascade deletes, and automated migration runner (`migrateDbIfNeeded`). |
 | **Bookmark & Collection CRUD** | ✅ Completed | Create, read, update, delete, tag, favorite, search/filter bookmarks, and assign color-coded collections. External links open via secure system browser. |
-| **Automated Test Suite** | ✅ Completed | 24 automated unit & integration tests across 7 test suites (auth, database, screens, userinfo) using Jest, `jest-expo`, and `@testing-library/react-native`. |
+| **Automated Test Suite** | ✅ Completed | 44 automated unit & integration tests across 8 test suites (auth, database, screens, userinfo) using Jest, `jest-expo`, and `@testing-library/react-native`. |
+| **Full-Text Search (FTS5)** | ✅ Completed | Instant search across bookmark titles and notes powered by SQLite FTS5 virtual tables with automated sync triggers, Unicode tokenization, and prefix matching. |
 | **An "everything" screen** | ⏭️ *Skipped* | Collections shown together with the bookmarks inside them, rather than two lists. **Why:** Focused on dedicated collection filtering tabs and modular list views for better biometric privacy isolation and cleaner mobile layout. |
-| **Full-text search** | ⏭️ *Skipped* | Across bookmark titles and notes. **Why:** Implemented direct substring search across titles, URLs, and tags; omitted SQLite FTS5 full-text indexing to keep the schema lightweight and performant. |
 
 ---
 
@@ -55,6 +69,11 @@ To assist the review and grading process, here is a transparent summary of what 
   - High-performance on-device storage utilizing modern `expo-sqlite` (`SQLiteProvider` and repository pattern).
   - Parameterized queries to ensure data integrity and prevent SQL injection.
   - Automated schema migration support (`migrateDbIfNeeded`).
+- 🔍 **Full-Text Search (SQLite FTS5):**
+  - Instant on-device full-text search across bookmark titles and notes using SQLite FTS5 virtual tables.
+  - Automated sync triggers (`AFTER INSERT`, `AFTER UPDATE`, `AFTER DELETE`) ensuring real-time index synchronization without manual overhead.
+  - Prefix matching and Unicode tokenization for fast, incremental search as you type.
+  - Relevance ranking (`rank` scoring) integrated with collection and ownership filters.
 - 📑 **Bookmark & Collection Management:**
   - Create, view, edit, search, and delete bookmarks.
   - Organize bookmarks into color-coded collections with custom privacy levels.
@@ -87,8 +106,7 @@ To assist the review and grading process, here is a transparent summary of what 
 
 ```
 kiki-bookmark/
-├── app/
-│   └── app-debug.apk       # Pre-built Android debug APK for reviewers
+├── app/                    # Destination folder for built APK (generated via npm run build:android)
 ├── assets/                 # App icons, splash screens, adaptive icons
 ├── src/
 │   ├── auth/               # Auth0 configuration, biometrics helper, userinfo mapping
@@ -163,6 +181,12 @@ npm run ios
 #### Start Metro Bundler (if build is already installed)
 ```bash
 npm start
+```
+
+#### Build Standalone Debug APK
+```bash
+# Prebuilds native Android files (if missing), runs Gradle assembleDebug, and copies APK to app/
+npm run build:android
 ```
 
 ---

@@ -119,7 +119,7 @@ export const BookmarkDetailsScreen: React.FC<
 
   if (isBookmarkLoading && !bookmark) {
     return (
-      <SafeAreaView style={styles.centerContainer}>
+      <SafeAreaView style={styles.centerContainer} edges={['bottom', 'left', 'right']}>
         <ActivityIndicator size="large" color="#4F46E5" />
       </SafeAreaView>
     );
@@ -127,7 +127,7 @@ export const BookmarkDetailsScreen: React.FC<
 
   if (!bookmark) {
     return (
-      <SafeAreaView style={styles.centerContainer}>
+      <SafeAreaView style={styles.centerContainer} edges={['bottom', 'left', 'right']}>
         <Text style={styles.emptyTitle}>Bookmark not found</Text>
         <TouchableOpacity
           style={styles.backButton}
@@ -140,7 +140,7 @@ export const BookmarkDetailsScreen: React.FC<
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['bottom', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.card}>
           <View style={styles.badgeRow}>
@@ -264,7 +264,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
   },
   content: {
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 40,
   },
   card: {
     backgroundColor: '#FFFFFF',

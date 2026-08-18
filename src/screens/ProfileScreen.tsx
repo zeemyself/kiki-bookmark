@@ -1,12 +1,10 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   StyleSheet,
   Text,
   View,
   TouchableOpacity,
   ScrollView,
-  TextInput,
-  Modal,
   Alert,
   ActivityIndicator,
   Image,
@@ -21,7 +19,6 @@ import {
   UserProfile,
   getUserProfile,
   getUserStats,
-  updateUserProfile,
   upsertUserProfile,
   CURRENT_USER,
   migrateDbIfNeeded,
@@ -36,29 +33,12 @@ import {
   authenticateWithBiometrics,
   isBiometricUnlockEnabled,
   setBiometricUnlockEnabled,
-  BiometricCapabilities,
 } from '../auth';
 
-export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
-  navigation,
-}) => {
+export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = () => {
   const db = useSQLiteContext();
   const queryClient = useQueryClient();
-  const { authorize, clearSession, user, error: auth0Error, isLoading: auth0Loading, getCredentials } = useAuth0();
-
-  const [isEditModalVisible, setIsEditModalVisible] = useState(false);
-  const [editName, setEditName] = useState('');
-  const [editEmail, setEditEmail] = useState('');
-  const [editRole, setEditRole] = useState('');
-
-  const [tokensInfo, setTokensInfo] = useState<{
-    accessToken?: string;
-    idToken?: string;
-    expiresIn?: number;
-    tokenType?: string;
-    scope?: string;
-  } | null>(null);
-  const [isTokenModalVisible, setIsTokenModalVisible] = useState(false);
+  const { authorize, clearSession, user, getCredentials } = useAuth0();
 
   const currentUserId = user?.sub || CURRENT_USER.id;
 
@@ -95,7 +75,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   });
 
   // Query: Biometric Status & Capabilities
-  const { data: biometricStatus, isLoading: isBiometricLoading } = useQuery({
+  const { data: biometricStatus } = useQuery({
     queryKey: ['biometrics', 'status'],
     queryFn: async () => {
       const [capabilities, isEnabled] = await Promise.all([
@@ -109,7 +89,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const biometrics = biometricStatus?.capabilities;
   const biometricEnabled = !!biometricStatus?.isEnabled;
 
-  // Query: OIDC /userinfo with automatic SQLite claims sync
+  // Query: OIDC /userinfo with automatic SQLite claims sync (non-sensitive profile sync)
   const {
     data: userInfoResult,
     isFetching: isUserInfoLoading,
@@ -138,7 +118,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               id: result.data.sub || user.sub,
               name: result.data.name || result.data.nickname || user.name || 'Auth0 User',
               email: result.data.email || user.email || '',
-              role: 'Auth0 Verified Member (OIDC /userinfo)',
+              role: 'Auth0 Verified Member',
               avatarColor: '#10B981',
               joinedAt: profile?.joinedAt || new Date().toISOString(),
             };
@@ -201,7 +181,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
       });
     },
     onSuccess: () => {
-      setTokensInfo(null);
       queryClient.invalidateQueries({ queryKey: ['userProfile'] });
       queryClient.invalidateQueries({ queryKey: ['userInfo'] });
       queryClient.invalidateQueries({ queryKey: ['bookmarks'] });
@@ -212,34 +191,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
       if (e?.message && !e.message.includes('cancelled')) {
         Alert.alert('Sign Out Info', e.message || 'Session cleared.');
       }
-    },
-  });
-
-  // Mutation: Inspect Tokens
-  const inspectTokensMutation = useMutation({
-    mutationFn: async () => {
-      const credentials = await getCredentials(
-        AUTH0_CONFIG.scope,
-        0,
-        { audience: AUTH0_CONFIG.audience }
-      );
-      if (!credentials) {
-        throw new Error('Please sign in with Auth0 first to view tokens.');
-      }
-      return credentials;
-    },
-    onSuccess: (credentials) => {
-      setTokensInfo({
-        accessToken: credentials.accessToken,
-        idToken: credentials.idToken,
-        expiresIn: credentials.expiresIn,
-        tokenType: credentials.tokenType,
-        scope: credentials.scope,
-      });
-      setIsTokenModalVisible(true);
-    },
-    onError: (err: any) => {
-      Alert.alert('Token Retrieval', err?.message || 'No valid credentials found. Please sign in.');
     },
   });
 
@@ -317,41 +268,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     },
   });
 
-  // Mutation: Save Profile
-  const saveProfileMutation = useMutation({
-    mutationFn: async (data: { name: string; email: string; role: string }) => {
-      if (!profile) return;
-      await updateUserProfile(db, profile.id, {
-        name: data.name.trim() || profile.name,
-        email: data.email.trim() || profile.email,
-        role: data.role.trim() || profile.role,
-      });
-    },
-    onSuccess: () => {
-      setIsEditModalVisible(false);
-      queryClient.invalidateQueries({ queryKey: ['userProfile', currentUserId] });
-    },
-    onError: () => {
-      Alert.alert('Error', 'Failed to update profile.');
-    },
-  });
-
-  const openEditModal = () => {
-    if (!profile) return;
-    setEditName(profile.name);
-    setEditEmail(profile.email);
-    setEditRole(profile.role);
-    setIsEditModalVisible(true);
-  };
-
-  const handleSaveProfile = () => {
-    saveProfileMutation.mutate({
-      name: editName,
-      email: editEmail,
-      role: editRole,
-    });
-  };
-
   const handleResetDatabase = () => {
     Alert.alert(
       'Reset Local SQLite Data',
@@ -381,14 +297,13 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
     );
   };
 
-  const authActionLoading = auth0LoginMutation.isPending || auth0LogoutMutation.isPending || inspectTokensMutation.isPending;
+  const authActionLoading = auth0LoginMutation.isPending || auth0LogoutMutation.isPending;
   const biometricTesting = testBiometricMutation.isPending;
-  const saving = saveProfileMutation.isPending;
   const userInfoLoading = isUserInfoLoading;
 
   if (isProfileLoading && !profile) {
     return (
-      <SafeAreaView style={styles.centerContainer}>
+      <SafeAreaView style={styles.centerContainer} edges={['bottom', 'left', 'right']}>
         <ActivityIndicator size="large" color="#4F46E5" />
       </SafeAreaView>
     );
@@ -404,8 +319,8 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
   const isAuthenticated = !!user;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.content}>
+    <SafeAreaView style={styles.container} edges={['bottom', 'left', 'right']}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {/* Profile Card */}
         <View style={styles.profileCard}>
           <View style={styles.avatarSection}>
@@ -413,6 +328,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
               <Image source={{ uri: user.picture }} style={styles.avatarImage} />
             ) : (
               <View
+
                 style={[
                   styles.avatarCircle,
                   { backgroundColor: isAuthenticated ? '#10B981' : (profile?.avatarColor || '#4F46E5') },
@@ -440,7 +356,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           </View>
 
           <Text style={styles.userName}>{user?.name || profile?.name}</Text>
-          <Text style={styles.userRole}>{isAuthenticated ? 'Auth0 OpenID Connect Account' : profile?.role}</Text>
+          <Text style={styles.userRole}>{isAuthenticated ? 'Auth0 Account' : profile?.role}</Text>
           <Text style={styles.userEmail}>{user?.email || profile?.email}</Text>
 
           {/* Primary Auth Action Button */}
@@ -472,14 +388,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
                 )}
               </TouchableOpacity>
             )}
-
-            <TouchableOpacity
-              style={styles.editProfileBtn}
-              activeOpacity={0.8}
-              onPress={openEditModal}
-            >
-              <Text style={styles.editProfileBtnText}>✏️ Edit Profile Info</Text>
-            </TouchableOpacity>
           </View>
         </View>
 
@@ -494,188 +402,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
             <Text style={styles.statNumber}>{stats.bookmarksCount}</Text>
             <Text style={styles.statLabel}>Bookmarks</Text>
           </View>
-        </View>
-
-        {/* OIDC & Auth0 Configuration Spec */}
-        <Text style={styles.sectionHeader}>Auth0 OIDC Configuration</Text>
-        <View style={styles.infoCard}>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Auth Status</Text>
-            <View style={styles.statusRow}>
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: isAuthenticated ? '#10B981' : '#F59E0B' },
-                ]}
-              />
-              <Text style={styles.infoVal}>
-                {isAuthenticated ? 'Authenticated' : 'Unauthenticated / Guest'}
-              </Text>
-            </View>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Discovery Endpoint</Text>
-            <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
-              {AUTH0_CONFIG.discoveryEndpoint}
-            </Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Auth0 Domain</Text>
-            <Text style={styles.infoVal}>{AUTH0_CONFIG.domain}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Client ID</Text>
-            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.clientId}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Application ID</Text>
-            <Text style={styles.infoVal}>{AUTH0_CONFIG.bundleId}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Redirect URI</Text>
-            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.redirectUri}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Logout URI</Text>
-            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.logoutUri}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Scope</Text>
-            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.scope}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>API Audience</Text>
-            <Text style={styles.infoValSmall}>{AUTH0_CONFIG.audience}</Text>
-          </View>
-
-          {isAuthenticated && (
-            <>
-              <View style={styles.divider} />
-              <TouchableOpacity
-                style={styles.inspectTokenButton}
-                activeOpacity={0.8}
-                onPress={() => inspectTokensMutation.mutate()}
-                disabled={authActionLoading}
-              >
-                <Text style={styles.inspectTokenButtonText}>🔍 Inspect Auth Tokens & Claims</Text>
-              </TouchableOpacity>
-            </>
-          )}
-        </View>
-
-        {/* Remote /userinfo OIDC Verification */}
-        <Text style={styles.sectionHeader}>Remote Credential Call (GET /userinfo)</Text>
-        <View style={styles.infoCard}>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Endpoint</Text>
-            <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
-              {AUTH0_CONFIG.userinfoEndpoint}
-            </Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Credential</Text>
-            <Text style={styles.infoVal}>Bearer Access Token</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Policy</Text>
-            <Text style={styles.infoVal}>One-shot per session (Rate limit guard)</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Call Status</Text>
-            <View style={styles.statusRow}>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor: userInfoData
-                      ? '#10B981'
-                      : userInfoMeta?.error
-                      ? '#EF4444'
-                      : '#F59E0B',
-                  },
-                ]}
-              />
-              <Text style={styles.infoVal}>
-                {userInfoLoading
-                  ? 'Fetching...'
-                  : userInfoData
-                  ? userInfoMeta?.fromCache
-                    ? 'Served from Session Cache'
-                    : 'Verified Live from IdP'
-                  : userInfoMeta?.error
-                  ? 'Fallback to Cached Profile'
-                  : 'Awaiting Login'}
-              </Text>
-            </View>
-          </View>
-
-          {userInfoData && (
-            <>
-              <View style={styles.divider} />
-              <View style={styles.infoRow}>
-                <Text style={styles.infoKey}>Subject Claim (sub)</Text>
-                <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
-                  {userInfoData.sub}
-                </Text>
-              </View>
-              {userInfoData.email_verified !== undefined && (
-                <>
-                  <View style={styles.divider} />
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoKey}>Email Verified</Text>
-                    <Text
-                      style={[
-                        styles.infoVal,
-                        { color: userInfoData.email_verified ? '#059669' : '#DC2626' },
-                      ]}
-                    >
-                      {userInfoData.email_verified ? '✓ Verified (true)' : '✗ Unverified (false)'}
-                    </Text>
-                  </View>
-                </>
-              )}
-              {userInfoMeta?.lastFetchedAt && (
-                <>
-                  <View style={styles.divider} />
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoKey}>Last Synced</Text>
-                    <Text style={styles.infoValSmall}>{userInfoMeta.lastFetchedAt}</Text>
-                  </View>
-                </>
-              )}
-            </>
-          )}
-
-          {isAuthenticated && (
-            <>
-              <View style={styles.divider} />
-              <TouchableOpacity
-                style={[styles.inspectTokenButton, { backgroundColor: '#F0FDF4' }]}
-                activeOpacity={0.8}
-                onPress={() => refetchUserInfo()}
-                disabled={userInfoLoading}
-              >
-                {userInfoLoading ? (
-                  <ActivityIndicator size="small" color="#059669" />
-                ) : (
-                  <Text style={[styles.inspectTokenButtonText, { color: '#059669' }]}>
-                    🔄 Refresh /userinfo (One-shot)
-                  </Text>
-                )}
-              </TouchableOpacity>
-            </>
-          )}
         </View>
 
         {/* Biometrics & Hardware Security */}
@@ -754,16 +480,76 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           </TouchableOpacity>
         </View>
 
-        {/* Identity & Database Meta */}
-        <Text style={styles.sectionHeader}>Database & Device Storage</Text>
+        {/* Account & Session Info */}
+        <Text style={styles.sectionHeader}>Account & Authentication</Text>
         <View style={styles.infoCard}>
           <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Active User ID / Sub</Text>
-            <Text style={styles.infoValSmall} numberOfLines={1} ellipsizeMode="middle">
-              {profile?.id}
-            </Text>
+            <Text style={styles.infoKey}>Authentication Provider</Text>
+            <Text style={styles.infoVal}>Auth0 (OpenID Connect)</Text>
           </View>
           <View style={styles.divider} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Account Status</Text>
+            <View style={styles.statusRow}>
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: isAuthenticated ? '#10B981' : '#F59E0B' },
+                ]}
+              />
+              <Text style={styles.infoVal}>
+                {isAuthenticated ? 'Connected & Verified' : 'Offline / Guest Mode'}
+              </Text>
+            </View>
+          </View>
+          {isAuthenticated && userInfoData?.email_verified !== undefined && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.infoRow}>
+                <Text style={styles.infoKey}>Email Verification</Text>
+                <Text
+                  style={[
+                    styles.infoVal,
+                    { color: userInfoData.email_verified ? '#059669' : '#DC2626' },
+                  ]}
+                >
+                  {userInfoData.email_verified ? '✓ Verified' : '✗ Unverified'}
+                </Text>
+              </View>
+            </>
+          )}
+          {isAuthenticated && userInfoMeta?.lastFetchedAt && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.infoRow}>
+                <Text style={styles.infoKey}>Last Profile Sync</Text>
+                <Text style={styles.infoValSmall}>{userInfoMeta.lastFetchedAt}</Text>
+              </View>
+            </>
+          )}
+
+          {isAuthenticated && (
+            <>
+              <View style={styles.divider} />
+              <TouchableOpacity
+                style={styles.syncButton}
+                activeOpacity={0.8}
+                onPress={() => refetchUserInfo()}
+                disabled={userInfoLoading}
+              >
+                {userInfoLoading ? (
+                  <ActivityIndicator size="small" color="#4F46E5" />
+                ) : (
+                  <Text style={styles.syncButtonText}>🔄 Sync Profile Data</Text>
+                )}
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+
+        {/* Database & Storage */}
+        <Text style={styles.sectionHeader}>Local Database & Storage</Text>
+        <View style={styles.infoCard}>
           <View style={styles.infoRow}>
             <Text style={styles.infoKey}>Storage Engine</Text>
             <Text style={styles.infoVal}>expo-sqlite (SDK 57)</Text>
@@ -789,7 +575,7 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           </View>
         </View>
 
-        {/* Developer Actions */}
+        {/* Danger Zone / Reset */}
         <TouchableOpacity
           style={styles.dangerButton}
           activeOpacity={0.8}
@@ -798,131 +584,6 @@ export const ProfileScreen: React.FC<RootStackScreenProps<'Profile'>> = ({
           <Text style={styles.dangerButtonText}>🔄 Reset Local SQLite Database</Text>
         </TouchableOpacity>
       </ScrollView>
-
-      {/* Edit Profile Modal */}
-      <Modal
-        visible={isEditModalVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setIsEditModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <Text style={styles.modalTitle}>Edit Local Profile</Text>
-
-            <Text style={styles.inputLabel}>Full Name</Text>
-            <TextInput
-              style={styles.input}
-              value={editName}
-              onChangeText={setEditName}
-              placeholder="Full Name"
-              placeholderTextColor="#94A3B8"
-            />
-
-            <Text style={styles.inputLabel}>Email</Text>
-            <TextInput
-              style={styles.input}
-              value={editEmail}
-              onChangeText={setEditEmail}
-              placeholder="Email"
-              placeholderTextColor="#94A3B8"
-              keyboardType="email-address"
-              autoCapitalize="none"
-            />
-
-            <Text style={styles.inputLabel}>Role / Title</Text>
-            <TextInput
-              style={styles.input}
-              value={editRole}
-              onChangeText={setEditRole}
-              placeholder="Role or Title"
-              placeholderTextColor="#94A3B8"
-            />
-
-            <View style={styles.modalActionRow}>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalCancelBtn]}
-                onPress={() => setIsEditModalVisible(false)}
-                disabled={saving}
-              >
-                <Text style={styles.modalCancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalSaveBtn]}
-                onPress={handleSaveProfile}
-                disabled={saving}
-              >
-                <Text style={styles.modalSaveBtnText}>
-                  {saving ? 'Saving...' : 'Save'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Inspect Tokens Modal */}
-      <Modal
-        visible={isTokenModalVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setIsTokenModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <Text style={styles.modalTitle}>Auth0 Tokens & Claims</Text>
-
-            <ScrollView style={{ maxHeight: 350 }}>
-              <Text style={styles.inputLabel}>Token Type</Text>
-              <Text style={styles.tokenValueText}>{tokensInfo?.tokenType || 'Bearer'}</Text>
-
-              <Text style={styles.inputLabel}>Expires In</Text>
-              <Text style={styles.tokenValueText}>
-                {tokensInfo?.expiresIn ? `${tokensInfo.expiresIn} seconds` : 'N/A'}
-              </Text>
-
-              <Text style={styles.inputLabel}>Granted Scopes</Text>
-              <Text style={styles.tokenValueText}>{tokensInfo?.scope || AUTH0_CONFIG.scope}</Text>
-
-              <Text style={styles.inputLabel}>Access Token</Text>
-              <View style={styles.tokenBox}>
-                <Text style={styles.tokenMonoText} selectable>
-                  {tokensInfo?.accessToken || 'Not retrieved'}
-                </Text>
-              </View>
-
-              {tokensInfo?.idToken && (
-                <>
-                  <Text style={styles.inputLabel}>ID Token</Text>
-                  <View style={styles.tokenBox}>
-                    <Text style={styles.tokenMonoText} selectable>
-                      {tokensInfo.idToken}
-                    </Text>
-                  </View>
-                </>
-              )}
-
-              {userInfoData && (
-                <>
-                  <Text style={styles.inputLabel}>Decoded /userinfo Claims (Remote Call Result)</Text>
-                  <View style={styles.tokenBox}>
-                    <Text style={styles.tokenMonoText} selectable>
-                      {JSON.stringify(userInfoData, null, 2)}
-                    </Text>
-                  </View>
-                </>
-              )}
-            </ScrollView>
-
-            <TouchableOpacity
-              style={[styles.modalBtn, styles.modalSaveBtn, { marginTop: 16 }]}
-              onPress={() => setIsTokenModalVisible(false)}
-            >
-              <Text style={styles.modalSaveBtnText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 };
@@ -939,7 +600,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
   },
   content: {
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingTop: 16,
     paddingBottom: 40,
   },
   profileCard: {
@@ -1058,18 +720,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 14,
   },
-  editProfileBtn: {
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  editProfileBtnText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#334155',
-  },
   sectionHeader: {
     fontSize: 13,
     fontWeight: '700',
@@ -1153,14 +803,14 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: '#F1F5F9',
   },
-  inspectTokenButton: {
+  syncButton: {
     marginTop: 10,
     backgroundColor: '#EEF2FF',
     paddingVertical: 10,
     borderRadius: 8,
     alignItems: 'center',
   },
-  inspectTokenButtonText: {
+  syncButtonText: {
     fontSize: 13,
     fontWeight: '600',
     color: '#4F46E5',
@@ -1220,88 +870,5 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 14,
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.5)',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  modalContainer: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#0F172A',
-    marginBottom: 16,
-  },
-  inputLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#475569',
-    marginBottom: 4,
-    textTransform: 'uppercase',
-  },
-  input: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: '#0F172A',
-    marginBottom: 14,
-  },
-  modalActionRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 8,
-  },
-  modalBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  modalCancelBtn: {
-    backgroundColor: '#F1F5F9',
-  },
-  modalCancelBtnText: {
-    color: '#475569',
-    fontWeight: '600',
-  },
-  modalSaveBtn: {
-    backgroundColor: '#4F46E5',
-  },
-  modalSaveBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
-  tokenValueText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: '#1E293B',
-    marginBottom: 12,
-  },
-  tokenBox: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 12,
-  },
-  tokenMonoText: {
-    fontSize: 11,
-    fontFamily: 'monospace',
-    color: '#334155',
-  },
 });
+

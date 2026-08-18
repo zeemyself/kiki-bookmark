@@ -40,6 +40,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
+    "build:android": "npx expo prebuild --platform android --no-install && cd android && ./gradlew assembleDebug && cd .. && mkdir -p app && cp android/app/build/outputs/apk/debug/app-debug.apk app/",
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
