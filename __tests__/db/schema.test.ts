@@ -37,14 +37,61 @@ describe('Database Schema and Migrations', () => {
     expect(mockExecAsync).toHaveBeenCalledWith(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS app_settings')
     );
+    expect(mockExecAsync).toHaveBeenCalledWith(
+      expect.stringContaining('CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5')
+    );
+    expect(mockExecAsync).toHaveBeenCalledWith(
+      expect.stringContaining('CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks')
+    );
 
     // Checks final version pragma
-    expect(mockExecAsync).toHaveBeenCalledWith('PRAGMA user_version = 2;');
+    expect(mockExecAsync).toHaveBeenCalledWith('PRAGMA user_version = 3;');
+  });
+
+  it('migrates from user_version 2 to user_version 3 with FTS virtual table and backfill', async () => {
+    const mockExecAsync = jest.fn().mockResolvedValue(undefined);
+    const mockGetFirstAsync = jest.fn().mockResolvedValue({ user_version: 2 });
+
+    const mockDb: any = {
+      execAsync: mockExecAsync,
+      getFirstAsync: mockGetFirstAsync,
+    };
+
+    await migrateDbIfNeeded(mockDb);
+
+    // Checks FTS virtual table creation and data backfill
+    expect(mockExecAsync).toHaveBeenCalledWith(
+      expect.stringContaining('CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5')
+    );
+    expect(mockExecAsync).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO bookmarks_fts(rowid, title, notes)')
+    );
+    expect(mockExecAsync).toHaveBeenCalledWith('PRAGMA user_version = 3;');
+  });
+
+  it('migrates from user_version 1 to user_version 3 (app_settings and FTS)', async () => {
+    const mockExecAsync = jest.fn().mockResolvedValue(undefined);
+    const mockGetFirstAsync = jest.fn().mockResolvedValue({ user_version: 1 });
+
+    const mockDb: any = {
+      execAsync: mockExecAsync,
+      getFirstAsync: mockGetFirstAsync,
+    };
+
+    await migrateDbIfNeeded(mockDb);
+
+    expect(mockExecAsync).toHaveBeenCalledWith(
+      expect.stringContaining('CREATE TABLE IF NOT EXISTS app_settings')
+    );
+    expect(mockExecAsync).toHaveBeenCalledWith(
+      expect.stringContaining('CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5')
+    );
+    expect(mockExecAsync).toHaveBeenCalledWith('PRAGMA user_version = 3;');
   });
 
   it('skips schema migration when user_version is already at current version', async () => {
     const mockExecAsync = jest.fn().mockResolvedValue(undefined);
-    const mockGetFirstAsync = jest.fn().mockResolvedValue({ user_version: 2 });
+    const mockGetFirstAsync = jest.fn().mockResolvedValue({ user_version: 3 });
 
     const mockDb: any = {
       execAsync: mockExecAsync,

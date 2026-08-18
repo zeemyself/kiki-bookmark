@@ -1,6 +1,19 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { Bookmark, CreateBookmarkInput, UpdateBookmarkInput, CURRENT_USER } from './schema';
 
+export function sanitizeFtsQuery(query: string): string | null {
+  if (!query || !query.trim()) {
+    return null;
+  }
+  // Match word tokens across Unicode scripts (letters, numbers, underscores)
+  const tokens = query.trim().match(/[\p{L}\p{N}_]+/gu);
+  if (!tokens || tokens.length === 0) {
+    return null;
+  }
+  // Wrap each token in double quotes and append prefix wildcard for incremental matching
+  return tokens.map((token) => `"${token.replace(/"/g, '""')}"*`).join(' ');
+}
+
 export async function getBookmarks(
   db: SQLiteDatabase,
   options?: {
@@ -10,8 +23,40 @@ export async function getBookmarks(
   }
 ): Promise<Bookmark[]> {
   const ownerId = options?.ownerId ?? CURRENT_USER.id;
-  const search = options?.search ? `%${options.search.trim()}%` : null;
+  const rawSearch = options?.search?.trim();
   const collectionId = options?.collectionId;
+
+  if (rawSearch) {
+    const ftsQuery = sanitizeFtsQuery(rawSearch);
+    if (!ftsQuery) {
+      return [];
+    }
+
+    let query = `
+      SELECT 
+        b.*,
+        c.name AS collectionName,
+        c.color AS collectionColor
+      FROM bookmarks_fts fts
+      JOIN bookmarks b ON b.rowid = fts.rowid
+      LEFT JOIN collections c ON b.collectionId = c.id
+      WHERE b.ownerId = ? AND bookmarks_fts MATCH ?
+    `;
+    const params: (string | number | null)[] = [ownerId, ftsQuery];
+
+    if (collectionId !== undefined) {
+      if (collectionId === null) {
+        query += ' AND b.collectionId IS NULL';
+      } else {
+        query += ' AND b.collectionId = ?';
+        params.push(collectionId);
+      }
+    }
+
+    query += ' ORDER BY fts.rank ASC, b.createdAt DESC;';
+
+    return await db.getAllAsync<Bookmark>(query, params);
+  }
 
   let query = `
     SELECT 
@@ -33,14 +78,24 @@ export async function getBookmarks(
     }
   }
 
-  if (search) {
-    query += ' AND (b.title LIKE ? OR b.url LIKE ? OR b.notes LIKE ?)';
-    params.push(search, search, search);
-  }
-
   query += ' ORDER BY b.createdAt DESC;';
 
   return await db.getAllAsync<Bookmark>(query, params);
+}
+
+export async function searchBookmarks(
+  db: SQLiteDatabase,
+  query: string,
+  options?: {
+    collectionId?: string | null;
+    ownerId?: string;
+  }
+): Promise<Bookmark[]> {
+  return getBookmarks(db, {
+    search: query,
+    collectionId: options?.collectionId,
+    ownerId: options?.ownerId,
+  });
 }
 
 export async function getBookmarkById(

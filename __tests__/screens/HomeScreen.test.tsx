@@ -128,4 +128,22 @@ describe('HomeScreen (React Query)', () => {
     expect(await screen.findByText('Dev Tools')).toBeTruthy();
     expect(await screen.findByText('Tools for development')).toBeTruthy();
   });
+
+  it('triggers search query when search input text changes', async () => {
+    await renderWithClient(<HomeScreen navigation={{} as any} route={{} as any} />);
+
+    const searchInput = await screen.findByPlaceholderText('Search by title, url, or notes...');
+    fireEvent.changeText(searchInput, 'Expo SDK');
+
+    await waitFor(() => {
+      expect(mockGetBookmarks).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          search: 'Expo SDK',
+          ownerId: 'auth0|12345',
+        })
+      );
+    });
+  });
 });
+

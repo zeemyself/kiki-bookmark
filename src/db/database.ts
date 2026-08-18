@@ -3,7 +3,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 export const DATABASE_NAME = 'kiki_bookmarks.db';
 
 export async function migrateDbIfNeeded(db: SQLiteDatabase): Promise<void> {
-  const DATABASE_VERSION = 2;
+  const DATABASE_VERSION = 3;
 
   await db.execAsync(`
     PRAGMA journal_mode = 'wal';
@@ -63,9 +63,29 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase): Promise<void> {
         value TEXT NOT NULL,
         updatedAt TEXT NOT NULL
       );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+        title,
+        notes,
+        content='bookmarks',
+        content_rowid='rowid'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(rowid, title, notes) VALUES (new.rowid, new.title, coalesce(new.notes, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, notes) VALUES('delete', old.rowid, old.title, coalesce(old.notes, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, notes) VALUES('delete', old.rowid, old.title, coalesce(old.notes, ''));
+        INSERT INTO bookmarks_fts(rowid, title, notes) VALUES (new.rowid, new.title, coalesce(new.notes, ''));
+      END;
     `);
 
-    currentDbVersion = 2;
+    currentDbVersion = 3;
   }
 
   if (currentDbVersion === 1) {
@@ -77,6 +97,34 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase): Promise<void> {
       );
     `);
     currentDbVersion = 2;
+  }
+
+  if (currentDbVersion === 2) {
+    await db.execAsync(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+        title,
+        notes,
+        content='bookmarks',
+        content_rowid='rowid'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(rowid, title, notes) VALUES (new.rowid, new.title, coalesce(new.notes, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, notes) VALUES('delete', old.rowid, old.title, coalesce(old.notes, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, notes) VALUES('delete', old.rowid, old.title, coalesce(old.notes, ''));
+        INSERT INTO bookmarks_fts(rowid, title, notes) VALUES (new.rowid, new.title, coalesce(new.notes, ''));
+      END;
+
+      INSERT INTO bookmarks_fts(rowid, title, notes)
+      SELECT rowid, title, coalesce(notes, '') FROM bookmarks;
+    `);
+    currentDbVersion = 3;
   }
 
   await db.execAsync(`PRAGMA user_version = ${DATABASE_VERSION};`);
